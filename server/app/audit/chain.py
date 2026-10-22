@@ -55,6 +55,12 @@ def sign(secret: str, entry_hash: str) -> str:
     return hmac.new(secret.encode("utf-8"), entry_hash.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def _sign_payload(prev_hash: str, fields: dict[str, Any]) -> dict[str, str]:
+    """计算一条记录的哈希与签名（写入与校验共用同一口径）。"""
+    digest = canonical_hash(fields)
+    return {"digest": digest, "signature": sign(get_settings().audit_secret, digest)}
+
+
 def _payload_of(row: Any) -> dict[str, Any]:
     return {name: row[name] for name in HASH_FIELDS}
 
@@ -71,6 +77,72 @@ def _head_hash(conn: Any) -> str:
     return entry_hash_of(row)
 
 
+def append_entry_conn(
+    conn: Any,
+    *,
+    task_id: str,
+    input_hash: str,
+    output_hash: str,
+    model_chain: str,
+    confidence_vector: str = "",
+    rule_id: str = "",
+    operator_id: str = "system",
+    user_id: str = "local",
+    ts: str | None = None,
+) -> dict[str, Any]:
+    """在调用方已持有的事务里追加审计记录（不自行 commit）。
+
+    与 :func:`append_entry` 共用同一套哈希/签名口径；后台任务把 findings、
+    告警与审计放进同一个事务时使用本函数，避免「findings 已提交、审计缺失」。
+    """
+    settings = get_settings()
+    payload = {
+        # 统一转字符串：列在 SQLite 里是 TEXT，写入用 int、读回是 str 会导致校验哈希不一致
+        "task_id": str(task_id),
+        "input_hash": input_hash,
+        "output_hash": output_hash,
+        "model_chain": model_chain,
+        "confidence_vector": confidence_vector,
+        "rule_id": rule_id,
+        "operator_id": operator_id,
+        "user_id": user_id,
+        "ts": ts or utcnow_iso(),
+    }
+    payload["prev_hash"] = _head_hash(conn)
+    sign_payload = _sign_payload(payload["prev_hash"], {name: payload[name] for name in HASH_FIELDS})
+    digest = sign_payload["digest"]
+    signature = sign_payload["signature"]
+    conn.execute(
+        """
+        INSERT INTO audit_log
+          (ts, task_id, input_hash, output_hash, model_chain, confidence_vector,
+           rule_id, operator_id, user_id, prev_hash, signature)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            payload["ts"],
+            payload["task_id"],
+            payload["input_hash"],
+            payload["output_hash"],
+            payload["model_chain"],
+            payload["confidence_vector"],
+            payload["rule_id"],
+            payload["operator_id"],
+            payload["user_id"],
+            payload["prev_hash"],
+            signature,
+        ),
+    )
+    entry_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    return {
+        "id": entry_id,
+        "entry_hash": digest,
+        "signature": signature,
+        "prev_hash": payload["prev_hash"],
+        **{k: payload[k] for k in HASH_FIELDS},
+    }
+
+
 def append_entry(
     db: Database,
     *,
@@ -85,53 +157,19 @@ def append_entry(
     ts: str | None = None,
 ) -> dict[str, Any]:
     """追加一条审计记录：读取链头哈希 → 计算本条哈希 → 签名 → 插入。"""
-    settings = get_settings()
-    payload = {
-        # 统一转字符串：列在 SQLite 里是 TEXT，写入用 int、读回是 str 会导致校验哈希不一致
-        "task_id": str(task_id),
-        "input_hash": input_hash,
-        "output_hash": output_hash,
-        "model_chain": model_chain,
-        "confidence_vector": confidence_vector,
-        "rule_id": rule_id,
-        "operator_id": operator_id,
-        "user_id": user_id,
-        "ts": ts or utcnow_iso(),
-    }
     with db.write() as conn:
-        payload["prev_hash"] = _head_hash(conn)
-        # 注意：哈希口径只含 HASH_FIELDS，不含 prev_hash 本身（否则循环依赖）
-        digest = canonical_hash({name: payload[name] for name in HASH_FIELDS})
-        signature = sign(settings.audit_secret, digest)
-        conn.execute(
-            """
-            INSERT INTO audit_log
-              (ts, task_id, input_hash, output_hash, model_chain, confidence_vector,
-               rule_id, operator_id, user_id, prev_hash, signature)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                payload["ts"],
-                payload["task_id"],
-                payload["input_hash"],
-                payload["output_hash"],
-                payload["model_chain"],
-                payload["confidence_vector"],
-                payload["rule_id"],
-                payload["operator_id"],
-                payload["user_id"],
-                payload["prev_hash"],
-                signature,
-            ),
+        return append_entry_conn(
+            conn,
+            task_id=task_id,
+            input_hash=input_hash,
+            output_hash=output_hash,
+            model_chain=model_chain,
+            confidence_vector=confidence_vector,
+            rule_id=rule_id,
+            operator_id=operator_id,
+            user_id=user_id,
+            ts=ts,
         )
-        entry_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    return {
-        "id": entry_id,
-        "entry_hash": digest,
-        "signature": signature,
-        "prev_hash": payload["prev_hash"],
-        **{k: payload[k] for k in HASH_FIELDS},
-    }
 
 
 def list_entries(db: Database, limit: int = 50, offset: int = 0) -> tuple[list[dict[str, Any]], int]:

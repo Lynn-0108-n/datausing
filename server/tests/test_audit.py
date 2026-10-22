@@ -163,3 +163,33 @@ def test_full_export_via_cursor_verifies_offline(client) -> None:
     assert result["ok"] is True
     assert result["checked"] == 4
     assert result["partial"] is False
+
+
+def _wait_task_finished(client, task_id: str, timeout: float = 8.0) -> dict:
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        task = client.get(f"/api/v1/tasks/{task_id}").json()
+        if task["status"] in ("done", "failed"):
+            return task
+        time.sleep(0.05)
+    raise AssertionError(f"任务 {task_id} 在 {timeout}s 内未结束")
+
+
+def test_audit_failure_rolls_back_findings_and_alerts(client, monkeypatch) -> None:
+    """审计写入失败时，findings/告警必须一起回滚，任务标记 failed 而不是半状态。"""
+    from app.tasks import service as task_service
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("audit boom")
+
+    monkeypatch.setattr(task_service, "append_entry_conn", boom)
+    created = client.post("/api/v1/tasks/text", json={"text": "手机号 13800138000"}).json()
+    task = _wait_task_finished(client, created["task_id"])
+
+    assert task["status"] == "failed"
+    assert "audit boom" in task["error"]
+    assert client.get(f"/api/v1/tasks/{created['task_id']}/findings").json()["total"] == 0
+    assert client.get("/api/v1/audit").json()["total"] == 0
+    assert client.get("/api/v1/alerts").json()["total"] == 0

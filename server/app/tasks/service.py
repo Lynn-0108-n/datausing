@@ -10,15 +10,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 import uuid
 from typing import Any
 
 from ..alerts import insert_alerts
-from ..audit import append_entry
+from ..audit import append_entry_conn
 from ..core.db import Database, utcnow_iso
 from ..identify import DetectionPipeline, DetectOptions, Level
 from ..parsers.base import Document
+
+logger = logging.getLogger(__name__)
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"
@@ -141,6 +144,18 @@ def _execute(
             # 告警与 findings 同事务落库：保证「有检测结果就有对应告警」，
             # 失败时整体回滚，不出现"任务完成但队列里没告警"的半状态。
             insert_alerts(conn, task_id=task_id, findings=inserted)
+            # 审计链与 findings/告警同事务：任一条写入失败整体回滚，
+            # 不会出现「findings 已提交、任务却因审计失败被标记 failed」的半状态。
+            for finding in report.findings:
+                append_entry_conn(
+                    conn,
+                    task_id=task_id,
+                    input_hash=finding.original_hash,
+                    output_hash=_hash(finding.masked),
+                    model_chain=finding.model_chain,
+                    confidence_vector=json.dumps(finding.confidence_vector, ensure_ascii=False),
+                    rule_id=",".join(finding.rule_ids),
+                )
             conn.execute(
                 "UPDATE tasks SET status=?, finished_at=?, total_segments=?, total_findings=? WHERE id=?",
                 (
@@ -152,23 +167,17 @@ def _execute(
                 ),
             )
 
-        # 审计链：一条 finding 一条记录（只存哈希，不存原文）
-        for finding in report.findings:
-            append_entry(
-                db,
-                task_id=task_id,
-                input_hash=finding.original_hash,
-                output_hash=_hash(finding.masked),
-                model_chain=finding.model_chain,
-                confidence_vector=json.dumps(finding.confidence_vector, ensure_ascii=False),
-                rule_id=",".join(finding.rule_ids),
-            )
+        # 审计链写入已并入上面的同一事务（见 append_entry_conn 调用），
+        # 不再在事务外补写，避免「findings 已提交、审计失败后任务被改 failed」。
     except Exception as exc:  # noqa: BLE001 - 后台任务必须兜住所有异常
-        with db.write() as conn:
-            conn.execute(
-                "UPDATE tasks SET status=?, finished_at=?, error=? WHERE id=?",
-                (STATUS_FAILED, utcnow_iso(), f"{type(exc).__name__}: {exc}", task_id),
-            )
+        try:
+            with db.write() as conn:
+                conn.execute(
+                    "UPDATE tasks SET status=?, finished_at=?, error=? WHERE id=?",
+                    (STATUS_FAILED, utcnow_iso(), f"{type(exc).__name__}: {exc}", task_id),
+                )
+        except Exception:  # noqa: BLE001 - 兜底写库失败也不能让异常穿出 daemon 线程
+            logger.exception("任务 %s 标记 failed 失败", task_id)
 
 
 def get_task(db: Database, task_id: str) -> dict[str, Any] | None:
