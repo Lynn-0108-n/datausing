@@ -172,10 +172,30 @@ def test_require_genesis_rejects_partial_chain(database) -> None:
     assert "genesis" in result["reason"]
 
 
-def test_empty_export_passes(tmp_path: Path) -> None:
+def test_empty_export_is_not_reported_as_pass(tmp_path: Path) -> None:
+    """空文件不能报「通过」，否则删光内容即可伪造验签成功。"""
     result = ve.verify_rows(ve.load_rows(_write_jsonl(tmp_path / "empty.jsonl", [])), _secret())
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert result["total"] == 0 and result["checked"] == 0
+    assert "空" in result["reason"]
+
+
+def test_prefix_truncation_is_rejected_even_with_valid_signature(database) -> None:
+    """删掉链头几条、把新首条 prev_hash 改成 GENESIS 并重签名，也要被首条 id 检查拦住。"""
+    from app.audit.chain import GENESIS, entry_hash_of, sign
+
+    _append_three(database)
+    rows = _ascending_rows(database)
+    truncated = rows[1:]
+    first = truncated[0]
+    digest = entry_hash_of(first)
+    first["prev_hash"] = GENESIS
+    first["signature"] = sign(_secret(), f"{GENESIS}:{digest}")
+
+    result = ve.verify_rows(truncated, _secret())
+    assert result["ok"] is False
+    assert result["broken_at"] == first["id"]
+    assert "首条记录 id" in result["reason"]
 
 
 def test_rows_without_signature_are_rejected(database, tmp_path: Path) -> None:

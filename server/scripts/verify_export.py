@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hmac
 import io
 import json
 import sys
@@ -30,7 +29,7 @@ _SERVER_DIR = Path(__file__).resolve().parents[1]
 if str(_SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(_SERVER_DIR))
 
-from app.audit.chain import GENESIS, HASH_FIELDS, entry_hash_of, sign  # noqa: E402
+from app.audit.chain import GENESIS, HASH_FIELDS, entry_hash_of, verify_signature  # noqa: E402
 
 SUPPORTED_SUFFIXES = (".jsonl", ".ndjson", ".json", ".csv")
 
@@ -143,8 +142,11 @@ def verify_rows(
         "reason": "",
         "head_hash": GENESIS,
         "partial": False,
+        "legacy_rows": 0,
     }
     if not rows:
+        # 空文件说明不了任何事，不能报「通过」：否则删光导出内容即可伪造"验签通过"。
+        result.update(ok=False, partial=True, reason="导出文件为空，没有可校验的审计记录")
         return result
 
     ordered = _ordered(rows)
@@ -161,6 +163,15 @@ def verify_rows(
             ),
         )
         return result
+    # 完整链必须从 id=1 开始：只删链头若干条再把新首条 prev_hash 改成 GENESIS 的
+    # 前段截断，单看 prev_hash 是自洽的，必须靠首条 id 兜住。
+    if not partial and ordered[0]["id"] not in (None, 1):
+        result.update(
+            ok=False,
+            broken_at=ordered[0]["id"],
+            reason="首条记录 id 不是 1（前段记录被删除，链不完整）",
+        )
+        return result
 
     expected_prev = first_prev if partial else GENESIS
     head = expected_prev
@@ -175,7 +186,8 @@ def verify_rows(
             )
             return result
         digest = entry_hash_of(row)
-        if not hmac.compare_digest(sign(secret, digest), row["signature"]):
+        scheme = verify_signature(secret, row["prev_hash"], digest, row["signature"])
+        if scheme is None:
             result.update(
                 ok=False,
                 broken_at=row["id"],
@@ -183,6 +195,8 @@ def verify_rows(
                 head_hash=head,
             )
             return result
+        if scheme == "v1":
+            result["legacy_rows"] += 1
         expected_prev = digest
         head = digest
     result["head_hash"] = head
@@ -203,7 +217,9 @@ def format_report(result: dict[str, Any], path: Path) -> str:
     status = "通过" if result["ok"] else "失败"
     lines = [f"离线验签{status}：{path}"]
     if result["total"] == 0:
-        lines.append("  记录数 0（空导出，链路平凡通过）")
+        lines.append("  记录数 0（空导出，没有可校验的审计记录）")
+        if not result["ok"]:
+            lines.append(f"  原因：{result['reason']}")
         return "\n".join(lines)
     if result["partial"]:
         chain_desc = f"部分链（不是从 genesis 开始，只含 {result['total']} 条）"

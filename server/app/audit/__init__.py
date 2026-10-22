@@ -6,11 +6,13 @@ from .chain import (
     append_entry,
     append_entry_conn,
     canonical_hash,
+    entry_hash_of,
     export_entries,
     latest_entries,
     list_entries,
     sign,
     verify_chain,
+    verify_signature,
 )
 
 __all__ = [
@@ -19,9 +21,11 @@ __all__ = [
     "append_entry",
     "append_entry_conn",
     "canonical_hash",
+    "entry_hash_of",
     "export_entries",
     "latest_entries",
     "list_entries",
     "sign",
     "verify_chain",
+    "verify_signature",
 ]

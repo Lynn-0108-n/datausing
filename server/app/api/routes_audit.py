@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from ..audit.chain import (
     EXPORT_MAX_LIMIT,
+    GENESIS,
     entry_hash_of,
     export_entries,
     latest_entries,
@@ -78,6 +79,9 @@ def export_audit(
     headers = {
         "X-FlowMask-Audit-Total": str(total),
         "X-FlowMask-Audit-Returned": str(len(rows)),
+        # 链尾锚点：把本页最后一条的哈希随响应返回，调用方可另行保存，
+        # 之后即使整段尾部记录被删除，也能拿这个锚点对账（离线文件自身无法发现尾部截断）。
+        "X-FlowMask-Audit-Head": entry_hash_of(rows[-1]) if rows else GENESIS,
     }
     if next_after_id is not None:
         headers["X-FlowMask-Audit-Next-After-Id"] = str(next_after_id)

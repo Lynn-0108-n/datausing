@@ -56,9 +56,25 @@ def sign(secret: str, entry_hash: str) -> str:
 
 
 def _sign_payload(prev_hash: str, fields: dict[str, Any]) -> dict[str, str]:
-    """计算一条记录的哈希与签名（写入与校验共用同一口径）。"""
+    """计算一条记录的哈希与签名（写入与校验共用同一口径）。
+
+    签名覆盖 ``prev_hash``：只签本条字段的话，删掉链头若干条再把新首条的
+    ``prev_hash`` 改成 GENESIS 也能通过校验（"前段截断"伪造）。
+    """
     digest = canonical_hash(fields)
-    return {"digest": digest, "signature": sign(get_settings().audit_secret, digest)}
+    return {"digest": digest, "signature": sign(get_settings().audit_secret, f"{prev_hash}:{digest}")}
+
+
+def verify_signature(secret: str, prev_hash: str, digest: str, signature: str) -> str | None:
+    """校验签名并返回匹配的方案（``"v2"`` / ``"v1"`` / ``None``）。
+
+    v2 覆盖 prev_hash；v1 是旧版本只签本条哈希，仅用于兼容升级前写入的旧记录。
+    """
+    if hmac.compare_digest(sign(secret, f"{prev_hash}:{digest}"), signature):
+        return "v2"
+    if hmac.compare_digest(sign(secret, digest), signature):
+        return "v1"
+    return None
 
 
 def _payload_of(row: Any) -> dict[str, Any]:
@@ -218,13 +234,28 @@ def export_entries(
 
 
 def verify_chain(db: Database, secret: str | None = None) -> dict[str, Any]:
-    """从最早一条开始逐条校验：prev_hash 链接 + 字段哈希 + HMAC 签名。"""
+    """从最早一条开始逐条校验：prev_hash 链接 + 字段哈希 + HMAC 签名。
+
+    额外检查首条记录 id 必须是 1：若链头记录被删除，剩余记录即使字段与签名
+    都没被改过，也不能再当作完整链（``prev_hash`` 覆盖 + id 检查共同堵住前段截断）。
+    """
     key = get_settings().audit_secret if secret is None else secret
     expected_prev = GENESIS
     checked = 0
+    legacy_rows = 0
     head = GENESIS
     with db.connect() as conn:
         rows = conn.execute("SELECT * FROM audit_log ORDER BY id ASC").fetchall()
+    if rows and rows[0]["id"] != 1:
+        return {
+            "ok": False,
+            "total": len(rows),
+            "checked": 0,
+            "broken_at": rows[0]["id"],
+            "reason": "首条记录 id 不是 1（前段记录被删除，链不完整）",
+            "head_hash": GENESIS,
+            "legacy_rows": legacy_rows,
+        }
     for row in rows:
         checked += 1
         if row["prev_hash"] != expected_prev:
@@ -235,9 +266,11 @@ def verify_chain(db: Database, secret: str | None = None) -> dict[str, Any]:
                 "broken_at": row["id"],
                 "reason": "prev_hash 与上一条记录的哈希不一致（记录被删除、插入或重排）",
                 "head_hash": head,
+                "legacy_rows": legacy_rows,
             }
         digest = entry_hash_of(row)
-        if not hmac.compare_digest(sign(key, digest), row["signature"]):
+        scheme = verify_signature(key, row["prev_hash"], digest, row["signature"])
+        if scheme is None:
             return {
                 "ok": False,
                 "total": len(rows),
@@ -245,7 +278,10 @@ def verify_chain(db: Database, secret: str | None = None) -> dict[str, Any]:
                 "broken_at": row["id"],
                 "reason": "签名校验失败（记录字段被修改，或密钥不匹配）",
                 "head_hash": head,
+                "legacy_rows": legacy_rows,
             }
+        if scheme == "v1":
+            legacy_rows += 1
         expected_prev = digest
         head = digest
     return {
@@ -255,4 +291,5 @@ def verify_chain(db: Database, secret: str | None = None) -> dict[str, Any]:
         "broken_at": None,
         "reason": "",
         "head_hash": head,
+        "legacy_rows": legacy_rows,
     }

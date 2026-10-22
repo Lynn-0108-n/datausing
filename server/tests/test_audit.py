@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from app.audit import GENESIS, append_entry, canonical_hash, list_entries, verify_chain
+from app.audit import GENESIS, append_entry, canonical_hash, entry_hash_of, list_entries, verify_chain
 
 
 def _append_three(db) -> None:
@@ -92,6 +92,8 @@ def test_export_default_is_latest_slice_ascending(client) -> None:
     assert response.headers["X-FlowMask-Audit-Total"] == "3"
     assert response.headers["X-FlowMask-Audit-Returned"] == "3"
     assert "X-FlowMask-Audit-Next-After-Id" not in response.headers
+    # 链尾锚点：调用方可另存，用于事后发现「尾部整段被删」
+    assert response.headers["X-FlowMask-Audit-Head"] == entry_hash_of(rows[-1])
 
 
 def test_export_cursor_pages_through_whole_chain(client) -> None:
@@ -115,6 +117,7 @@ def test_export_cursor_pages_through_whole_chain(client) -> None:
     assert empty.status_code == 200
     assert empty.text == ""
     assert empty.headers["X-FlowMask-Audit-Returned"] == "0"
+    assert empty.headers["X-FlowMask-Audit-Head"] == GENESIS
 
 
 def test_export_json_reports_cursor_meta(client) -> None:
@@ -193,3 +196,75 @@ def test_audit_failure_rolls_back_findings_and_alerts(client, monkeypatch) -> No
     assert client.get(f"/api/v1/tasks/{created['task_id']}/findings").json()["total"] == 0
     assert client.get("/api/v1/audit").json()["total"] == 0
     assert client.get("/api/v1/alerts").json()["total"] == 0
+
+
+def test_prefix_deletion_with_rewritten_genesis_is_detected(database) -> None:
+    """删掉链头几条、把新首条 prev_hash 改成 GENESIS 并重签名，也要被首条 id 检查拦住。"""
+    from app.audit.chain import GENESIS, entry_hash_of, sign
+    from app.core.config import get_settings
+
+    _append_three(database)
+    with database.write() as conn:
+        rows = conn.execute("SELECT * FROM audit_log ORDER BY id ASC").fetchall()
+        first_remaining = dict(rows[1])
+        digest = entry_hash_of(first_remaining)
+        conn.execute("DELETE FROM audit_log WHERE id=?", (rows[0]["id"],))
+        conn.execute(
+            "UPDATE audit_log SET prev_hash=?, signature=? WHERE id=?",
+            (
+                GENESIS,
+                sign(get_settings().audit_secret, f"{GENESIS}:{digest}"),
+                first_remaining["id"],
+            ),
+        )
+
+    result = verify_chain(database)
+    assert result["ok"] is False
+    assert "首条记录 id" in result["reason"]
+
+
+def test_legacy_v1_signature_is_accepted_with_warning(database) -> None:
+    """升级前写入的旧记录（签名不含 prev_hash）仍可校验，并计入 legacy_rows。"""
+    from app.audit.chain import GENESIS, HASH_FIELDS, canonical_hash, sign
+    from app.core.config import get_settings
+    from app.core.db import utcnow_iso
+
+    payload = {
+        "task_id": "legacy-task",
+        "input_hash": canonical_hash({"i": "legacy"}),
+        "output_hash": canonical_hash({"o": "legacy"}),
+        "model_chain": "l1",
+        "confidence_vector": "[]",
+        "rule_id": "idcard18",
+        "operator_id": "system",
+        "user_id": "local",
+        "ts": utcnow_iso(),
+    }
+    digest = canonical_hash({name: payload[name] for name in HASH_FIELDS})
+    legacy_signature = sign(get_settings().audit_secret, digest)
+    with database.write() as conn:
+        conn.execute(
+            """
+            INSERT INTO audit_log
+              (ts, task_id, input_hash, output_hash, model_chain, confidence_vector,
+               rule_id, operator_id, user_id, prev_hash, signature)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                payload["ts"],
+                payload["task_id"],
+                payload["input_hash"],
+                payload["output_hash"],
+                payload["model_chain"],
+                payload["confidence_vector"],
+                payload["rule_id"],
+                payload["operator_id"],
+                payload["user_id"],
+                GENESIS,
+                legacy_signature,
+            ),
+        )
+
+    result = verify_chain(database)
+    assert result["ok"] is True
+    assert result["legacy_rows"] == 1

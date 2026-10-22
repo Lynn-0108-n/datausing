@@ -247,6 +247,7 @@ class VerifyOut(BaseModel):
     broken_at: int | None = None
     reason: str = ""
     head_hash: str
+    legacy_rows: int = Field(default=0, description="使用旧签名方案（未覆盖 prev_hash）的记录数")
 
 
 class KeywordTermOut(BaseModel):
