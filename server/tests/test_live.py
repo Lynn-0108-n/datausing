@@ -282,6 +282,13 @@ def test_live_follow_and_stop(client, database, data_dir: Path, live_manager) ->
     assert task["total_findings"] >= 1
     assert task["source"].startswith("live:")
 
+    # 告警联动：窗口任务落库时同事务生成告警，会话状态能按会话聚合看到
+    assert _wait(lambda: get_live().get("alert_total", 0) >= 1), get_live()
+    session = get_live()
+    assert session["alert_open"] >= 1
+    assert session["alert_by_level"].get("L3", 0) >= 1
+    assert session["last_alert_id"] and session["last_alert_title"]
+
     stopped = client.post(f"/api/v1/traffic/live/{live_id}/stop")
     assert stopped.status_code == 200
     assert stopped.json()["running"] is False

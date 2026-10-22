@@ -15,6 +15,7 @@ import pytest
 from app.alerts import (
     ALERT_STATUSES,
     alert_summary,
+    alerts_for_tasks,
     get_alert,
     handle_alert,
     insert_alerts,
@@ -226,6 +227,29 @@ def test_safe_text_has_no_alerts(client) -> None:
     task_id = _create_text_task(client, "今天天气不错，适合出门散步")
     _wait_done(client, task_id)
     assert client.get("/api/v1/alerts", params={"task_id": task_id}).json()["total"] == 0
+
+
+def test_alerts_for_tasks_aggregates_session_windows(client, database) -> None:
+    """实时旁路面板用：按会话的一组窗口任务聚合告警（不含明细）。"""
+    task_high = _create_text_task(client, f"身份证号：{ID_CARD}")
+    task_low = _create_text_task(client, f"联系电话 {PHONE}")
+    for task_id in (task_high, task_low):
+        assert _wait_done(client, task_id)["status"] == "done"
+
+    summary = alerts_for_tasks(database, [task_high, task_low])
+    assert summary["total"] >= 2
+    assert summary["open"] == summary["total"]
+    assert summary["by_level"]["L3"] >= 1 and summary["by_level"]["L2"] >= 1
+    last = summary["last_alert"]
+    assert last is not None and last["id"] > 0 and last["title"]
+    # 重复的任务 ID 不会重复计数
+    deduped = alerts_for_tasks(database, [task_high, task_high])
+    assert deduped["total"] == alerts_for_tasks(database, [task_high])["total"]
+
+    empty = alerts_for_tasks(database, [])
+    assert empty["total"] == 0 and empty["open"] == 0
+    assert empty["last_alert"] is None
+    assert set(empty["by_level"]) == {"L1", "L2", "L3"}
 
 
 def test_threshold_config_suppresses_low_level_alerts(tmp_env, monkeypatch) -> None:

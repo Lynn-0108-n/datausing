@@ -45,6 +45,8 @@ MAX_FRAME_BYTES = 1 << 16
 MAX_SEEN_KEYS = 20_000
 #: 待落库正文上限：识别链路持续失败时也不能无限堆积
 MAX_PENDING_SEGMENTS = 5_000
+#: 单个会话记住的窗口任务数上限：用于按会话聚合告警，长期跟随不能无限增长
+MAX_TRACKED_TASKS = 200
 
 #: pcapng 常量：Section Header Block 的 magic 是字节序无关的回文，
 #: 字节序标记（Byte-Order Magic）放在 SHB 偏移 8 处，用来判断后续块的大小端。
@@ -78,6 +80,8 @@ class LiveStats:
     tasks: int
     last_task_id: str | None
     last_error: str
+    #: 本会话各窗口生成的检测任务（有上限），用于按会话聚合告警
+    task_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -94,6 +98,7 @@ class LiveStats:
             "tasks": self.tasks,
             "last_task_id": self.last_task_id,
             "last_error": self.last_error,
+            "task_ids": list(self.task_ids),
         }
 
 
@@ -314,6 +319,7 @@ class _LiveSession:
     tasks: int = 0
     last_task_id: str | None = None
     last_error: str = ""
+    task_ids: list[str] = field(default_factory=list)
     _recent: list[Frame] = field(default_factory=list)
     _seen: set[str] = field(default_factory=set)
     _seen_order: deque[str] = field(default_factory=deque)
@@ -338,6 +344,7 @@ class _LiveSession:
                 tasks=self.tasks,
                 last_task_id=self.last_task_id,
                 last_error=self.last_error,
+                task_ids=tuple(self.task_ids),
             )
 
 
@@ -546,3 +553,6 @@ def _flush_window(session: _LiveSession) -> None:
         session.tasks += 1
         session.segments += len(pending)
         session.last_task_id = task_id
+        session.task_ids.append(task_id)
+        if len(session.task_ids) > MAX_TRACKED_TASKS:
+            del session.task_ids[: len(session.task_ids) - MAX_TRACKED_TASKS]

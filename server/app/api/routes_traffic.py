@@ -15,6 +15,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 
+from ..alerts import alerts_for_tasks
 from ..core.config import Settings
 from ..core.paths import resource_root
 from ..core.db import Database
@@ -204,7 +205,9 @@ def _resolve_live_path(raw: str, settings: Settings) -> Path:
     )
 
 
-def _live_out(stats: LiveStats) -> LiveOut:
+def _live_out(stats: LiveStats, db: Database | None = None) -> LiveOut:
+    alerts = alerts_for_tasks(db, stats.task_ids) if db is not None else None
+    last_alert = (alerts or {}).get("last_alert") or {}
     return LiveOut(
         live_id=stats.live_id,
         pcap_path=stats.pcap_path,
@@ -223,13 +226,19 @@ def _live_out(stats: LiveStats) -> LiveOut:
         tasks=stats.tasks,
         last_task_id=stats.last_task_id,
         last_error=stats.last_error,
+        alert_total=int((alerts or {}).get("total", 0)),
+        alert_open=int((alerts or {}).get("open", 0)),
+        alert_by_level=dict((alerts or {}).get("by_level", {})),
+        last_alert_id=last_alert.get("id"),
+        last_alert_title=last_alert.get("title", ""),
+        last_alert_level=last_alert.get("level", ""),
     )
 
 
 @router.get("/traffic/live", response_model=LiveListOut, summary="实时旁路跟随状态")
-def live_list() -> LiveListOut:
+def live_list(db: Database = Depends(db_dep)) -> LiveListOut:
     manager = get_live_manager()
-    return LiveListOut(sessions=[_live_out(item) for item in manager.list()])
+    return LiveListOut(sessions=[_live_out(item, db) for item in manager.list()])
 
 
 @router.post(
@@ -273,15 +282,15 @@ def live_start(
             else status.HTTP_400_BAD_REQUEST
         )
         raise HTTPException(status_code=code, detail=str(exc)) from exc
-    return _live_out(stats)
+    return _live_out(stats, db)
 
 
 @router.post("/traffic/live/{live_id}/stop", response_model=LiveOut, summary="停止实时跟随")
-def live_stop(live_id: str) -> LiveOut:
+def live_stop(live_id: str, db: Database = Depends(db_dep)) -> LiveOut:
     stats = get_live_manager().stop(live_id)
     if stats is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="没有这个实时跟随会话")
-    return _live_out(stats)
+    return _live_out(stats, db)
 
 
 @router.delete("/traffic/live", summary="清空已停止的实时跟随记录")

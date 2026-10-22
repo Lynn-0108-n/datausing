@@ -59,7 +59,7 @@ scripts\stop_local.cmd                            # 停止全部
 ### 2.2 手动启动（分步调试用）
 
 ```powershell
-python -m pytest -o addopts="" -q    # 441 个用例（440 通过 + 1 跳过）
+python -m pytest -o addopts="" -q    # 442 个用例（441 通过 + 1 跳过）
 python -m bench --markdown-out ../docs/性能报告.md   # 性能基准（L1/端到端/L2；加 --l3-endpoint 测 L3）
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
 # 构建正式前端（可选，需 Node 18+；产物在 ../web/dist）
@@ -351,7 +351,7 @@ python -m app.evaluate     # 默认 L1 only，几秒钟出结果
 | GET | `/traffic/sample` | 下载自带示例抓包 `demo-traffic.pcap`（3 条会话，含 L3/L2/SAFE） |
 | POST | `/traffic/ingest` | 外部推送正文片段（Go 采集端/Agent 用），复用同一套识别与落库 |
 | POST | `/traffic/live/start` | 开始实时跟随：`{pcap_path, interval_ms, window_s, ...}` → 返回会话（201） |
-| GET | `/traffic/live` | 实时会话列表（报文/片段/窗口任务数、最近任务、最近错误） |
+| GET | `/traffic/live` | 实时会话列表（报文/片段/窗口任务数、最近任务、最近错误、按会话聚合的告警统计） |
 | POST | `/traffic/live/{live_id}/stop` | 停止跟随（会把未写完的窗口先落库） |
 | DELETE | `/traffic/live` | 清理已停止的会话 |
 | POST | `/tasks` | 上传文件建任务 |
@@ -428,6 +428,8 @@ dumpcap -i 1 -w data/live.pcapng -b filesize:10240   # pcapng 同样是支持的
 语义与边界：
 
 - **窗口 = 一个任务**：`window_s` 到了就把这段时间新出现的正文汇总成一个检测任务，结果自动进「任务与审计链」「统计看板」，审计链照常逐条追加；
+- **告警联动**：窗口任务落库时同一事务内生成分级告警（9.2 的 `alerts` 表），`GET /traffic/live` 的每个会话额外返回
+  `alert_total / alert_open / alert_by_level / last_alert_id / last_alert_title`，前端实时面板直接展示「待处理/总数 + 最近一条」；
 - **去重**：同一 HTTP 请求（方法+路径+正文）只检测一次，跨窗口重复的握手/重传不会重复报；
 - **延迟**：最坏 = `interval_ms` + `window_s`，默认约 2.5 s；
 - **容器格式**：经典 pcap 与 pcapng 都支持（`dumpcap`/Wireshark 默认导出 pcapng）；pcapng 按块增量解析，
@@ -505,7 +507,7 @@ l3_training/         L3 指令微调：金标→指令样本、LoRA 训练、权
   l3_service/          L3 推理服务（mock / hf / instruct 后端 + /v1/judge”）
   samples/             自带示例抓包生成脚本与 demo-traffic.pcap
   eval/                评测集（351 条主集 + 200 条 NER 压力集）与评测说明
-  tests/               441 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、前端与脚本静态回归
+  tests/               442 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、前端与脚本静态回归
   pyproject.toml
   requirements.txt     运行依赖（固定版本）
   requirements-ml.txt  可选：L2/L3/NER/训练与导出

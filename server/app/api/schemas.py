@@ -407,6 +407,13 @@ class LiveOut(BaseModel):
     tasks: int
     last_task_id: str | None = None
     last_error: str = ""
+    # 告警联动：本会话各窗口任务自动生成的告警聚合（明细走 /alerts?task_id=...）
+    alert_total: int = 0
+    alert_open: int = 0
+    alert_by_level: dict[str, int] = Field(default_factory=dict)
+    last_alert_id: int | None = None
+    last_alert_title: str = ""
+    last_alert_level: str = ""
 
 
 class LiveListOut(BaseModel):

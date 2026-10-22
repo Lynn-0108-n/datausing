@@ -219,3 +219,49 @@ def alert_summary(db: Database, task_id: str | None = None) -> dict[str, Any]:
         "by_status": by_status,
         "task_id": task_id,
     }
+
+
+def alerts_for_tasks(db: Database, task_ids: Iterable[str]) -> dict[str, Any]:
+    """按一组任务聚合告警（实时旁路：一个会话的多个窗口任务）。
+
+    用于 ``/traffic/live`` 面板展示「本次跟随产生了多少告警、最近一条是什么」，
+    不返回明细列表；明细仍走 ``/alerts?task_id=...``。
+    """
+    ids = [str(task_id) for task_id in dict.fromkeys(task_ids) if task_id]
+    by_level = {level.value: 0 for level in Level if level != Level.SAFE}
+    summary: dict[str, Any] = {
+        "total": 0,
+        "open": 0,
+        "by_level": by_level,
+        "last_alert": None,
+    }
+    if not ids:
+        return summary
+    marks = ",".join("?" for _ in ids)
+    with db.connect() as conn:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM alerts WHERE task_id IN ({marks})", ids
+        ).fetchone()[0]
+        for row in conn.execute(
+            f"SELECT level, status, COUNT(*) AS n FROM alerts "
+            f"WHERE task_id IN ({marks}) GROUP BY level, status",
+            ids,
+        ):
+            by_level[row["level"]] = by_level.get(row["level"], 0) + int(row["n"])
+            if row["status"] == "open":
+                summary["open"] += int(row["n"])
+        last = conn.execute(
+            f"SELECT id, title, level, status, created_at FROM alerts "
+            f"WHERE task_id IN ({marks}) ORDER BY id DESC LIMIT 1",
+            ids,
+        ).fetchone()
+    summary["total"] = int(total)
+    if last is not None:
+        summary["last_alert"] = {
+            "id": int(last["id"]),
+            "title": last["title"],
+            "level": last["level"],
+            "status": last["status"],
+            "created_at": last["created_at"],
+        }
+    return summary

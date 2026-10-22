@@ -103,6 +103,11 @@ function levelLabel(level) {
   return LEVEL_LABELS[level] || level;
 }
 
+// 最近一条告警的标签颜色：L3 紧急 / L2 重要 / L1 提示
+function alertTagType(row) {
+  return { L3: "danger", L2: "warning", L1: "info" }[row.last_alert_level] || "info";
+}
+
 // ---------------- 实时旁路 ----------------
 
 const liveSessions = ref([]);
@@ -253,7 +258,10 @@ onBeforeUnmount(() => clearInterval(liveTimer));
     <template #header>
       <div class="card-head">
         <span>实时旁路（跟随持续增长的 pcap 文件）</span>
-        <span class="hint">服务端不直接抓网卡：由 dumpcap / Wireshark / 自研采集器持续写文件，这里按窗口增量检测</span>
+        <span class="hint">
+          服务端不直接抓网卡：由 dumpcap / Wireshark / 自研采集器持续写文件，这里按窗口增量检测；
+          窗口任务落库时会自动生成分级告警（见「告警」「最近告警」列）
+        </span>
       </div>
     </template>
 
@@ -284,6 +292,21 @@ onBeforeUnmount(() => clearInterval(liveTimer));
       <el-table-column prop="packets" label="报文" width="80" />
       <el-table-column prop="segments" label="待检测片段" width="110" />
       <el-table-column prop="tasks" label="窗口任务" width="90" />
+      <el-table-column label="告警" width="120">
+        <template #default="{ row }">
+          <el-tag v-if="row.alert_total" size="small" type="danger">
+            {{ row.alert_open }}/{{ row.alert_total }} 待处理
+          </el-tag>
+          <span v-else class="hint">无</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="最近告警" min-width="190" show-overflow-tooltip>
+        <template #default="{ row }">
+          <el-tag v-if="row.last_alert_id" size="small" :type="alertTagType(row)">
+            {{ row.last_alert_title }}
+          </el-tag>
+        </template>
+      </el-table-column>
       <el-table-column label="最近任务" min-width="150">
         <template #default="{ row }"><code v-if="row.last_task_id">{{ row.last_task_id }}</code></template>
       </el-table-column>
