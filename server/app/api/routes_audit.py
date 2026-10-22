@@ -14,7 +14,14 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
-from ..audit.chain import entry_hash_of, list_entries, verify_chain
+from ..audit.chain import (
+    EXPORT_MAX_LIMIT,
+    entry_hash_of,
+    export_entries,
+    latest_entries,
+    list_entries,
+    verify_chain,
+)
 from ..core.db import Database
 from .deps import db_dep
 from .schemas import AuditOut, AuditPage, VerifyOut
@@ -42,26 +49,69 @@ def verify(db: Database = Depends(db_dep)) -> VerifyOut:
     return VerifyOut(**verify_chain(db))
 
 
-@router.get("/audit/export", summary="导出审计记录（jsonl/json/csv）")
+@router.get("/audit/export", summary="导出审计记录（jsonl/json/csv，支持游标全量导出）")
 def export_audit(
     fmt: str = Query(default="jsonl", alias="format"),
+    limit: int = Query(default=200, ge=1, le=EXPORT_MAX_LIMIT, description="单次导出的条数上限"),
+    after_id: int | None = Query(
+        default=None,
+        ge=0,
+        description="游标：只导出 id 大于该值的记录（正序）；不传则导出最近 limit 条（兼容旧行为）",
+    ),
     db: Database = Depends(db_dep),
 ) -> Response:
+    """导出审计链。
+
+    不传 ``after_id``：保持旧行为，导出**最近** ``limit`` 条（默认 200），按 id 正序——
+    链很长时这只是"部分链"，离线验签脚本会据此标注。
+
+    传 ``after_id=0`` 开始分页全量导出：每页按 id 正序返回 ``limit`` 条，
+    响应头 ``X-FlowMask-Audit-Next-After-Id`` 给出下一页游标（到链尾时不返回该头），
+    逐页拼起来即为完整链，可直接交给 ``scripts/verify_export.py`` 验签。
+    """
     fmt = (fmt or "jsonl").lower()
-    rows, total = list_entries(db, limit=200, offset=0)
-    rows = list(reversed(rows))  # 导出按时间正序
+    next_after_id: int | None = None
+    if after_id is None:
+        rows, total = latest_entries(db, limit=limit)
+    else:
+        rows, total, next_after_id = export_entries(db, after_id=after_id, limit=limit)
+    headers = {
+        "X-FlowMask-Audit-Total": str(total),
+        "X-FlowMask-Audit-Returned": str(len(rows)),
+    }
+    if next_after_id is not None:
+        headers["X-FlowMask-Audit-Next-After-Id"] = str(next_after_id)
+
     if fmt == "jsonl":
-        body = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n"
+        body = "\n".join(json.dumps(row, ensure_ascii=False) for row in rows)
+        if body:
+            body += "\n"
         return Response(
             content=body.encode("utf-8"),
             media_type="application/x-ndjson; charset=utf-8",
-            headers={"Content-Disposition": 'attachment; filename="flowmask-audit.jsonl"'},
+            headers={
+                **headers,
+                "Content-Disposition": 'attachment; filename="flowmask-audit.jsonl"',
+            },
         )
     if fmt == "json":
         return Response(
-            content=json.dumps({"total": total, "items": rows}, ensure_ascii=False, indent=2).encode("utf-8"),
+            content=json.dumps(
+                {
+                    "total": total,
+                    "after_id": after_id,
+                    "returned": len(rows),
+                    "next_after_id": next_after_id,
+                    "items": rows,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ).encode("utf-8"),
             media_type="application/json; charset=utf-8",
-            headers={"Content-Disposition": 'attachment; filename="flowmask-audit.json"'},
+            headers={
+                **headers,
+                "Content-Disposition": 'attachment; filename="flowmask-audit.json"',
+            },
         )
     if fmt == "csv":
         buffer = io.StringIO()
@@ -86,7 +136,10 @@ def export_audit(
         return Response(
             content=("\ufeff" + buffer.getvalue()).encode("utf-8"),
             media_type="text/csv; charset=utf-8",
-            headers={"Content-Disposition": 'attachment; filename="flowmask-audit.csv"'},
+            headers={
+                **headers,
+                "Content-Disposition": 'attachment; filename="flowmask-audit.csv"',
+            },
         )
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,

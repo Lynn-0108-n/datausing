@@ -59,7 +59,7 @@ scripts\stop_local.cmd                            # 停止全部
 ### 2.2 手动启动（分步调试用）
 
 ```powershell
-python -m pytest -o addopts="" -q    # 397 个用例（396 通过 + 1 跳过）
+python -m pytest -o addopts="" -q    # 403 个用例（402 通过 + 1 跳过）
 python -m bench --markdown-out ../docs/性能报告.md   # 性能基准（L1/端到端/L2；加 --l3-endpoint 测 L3）
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
 # 构建正式前端（可选，需 Node 18+；产物在 ../web/dist）
@@ -93,6 +93,8 @@ curl.exe -s -o findings.jsonl "http://127.0.0.1:8090/api/v1/tasks/1/export?forma
 # 5) 审计导出离线验签：文件拷到任意机器都能复算哈希链（不连数据库、不起服务）
 curl.exe -s -o audit.jsonl "http://127.0.0.1:8090/api/v1/audit/export?format=jsonl"
 python -m scripts.verify_export audit.jsonl
+# 链很长时用游标分页导出完整链（after_id=0 从链头开始；响应头 Next-After-Id 给下一页游标）
+curl.exe -s -D headers.txt -o page1.jsonl "http://127.0.0.1:8090/api/v1/audit/export?format=jsonl&after_id=0&limit=1000"
 
 # 6) 分级告警：任务落库时自动生成，按级别/状态过滤，可认领或忽略
 curl.exe -s "http://127.0.0.1:8090/api/v1/alerts?level=L3"
@@ -370,7 +372,7 @@ python -m app.evaluate     # 默认 L1 only，几秒钟出结果
 | GET | `/audit/verify` | 校验哈希链（返回是否完整、断链位置） |
 | GET | `/dynamic/policy` | 动态脱敏策略表（四级各自的未授权/授权行为） |
 | POST | `/dynamic/render` | 动态脱敏渲染：`{text, authorized, mask_level?}`；每次渲染写审计链 |
-| GET | `/audit/export?format=jsonl\|json\|csv` | 审计导出 |
+| GET | `/audit/export?format=jsonl\|json\|csv&after_id=&limit=` | 审计导出：不传 `after_id` 导最近 `limit` 条（默认 200）；传 `after_id=0` 起游标分页导出完整链 |
 | GET | `/preferences` | 当前操作人的界面偏好（按 `X-Operator-Id` 区分；返回 `operator_id`/`theme`/`default_theme`/`available_themes`，`theme` 为空表示沿用默认） |
 | GET | `/preferences/users` | 已保存过偏好的操作人列表（前端顶栏「用户」下拉用） |
 | PUT | `/preferences` | 保存界面偏好：`{"theme": "light\|dark\|system"}` |
@@ -501,7 +503,7 @@ l3_training/         L3 指令微调：金标→指令样本、LoRA 训练、权
   l3_service/          L3 推理服务（mock / hf / instruct 后端 + /v1/judge”）
   samples/             自带示例抓包生成脚本与 demo-traffic.pcap
   eval/                评测集（351 条主集 + 200 条 NER 压力集）与评测说明
-  tests/               397 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表
+  tests/               403 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表
   pyproject.toml
   requirements.txt     运行依赖（固定版本）
   requirements-ml.txt  可选：L2/L3/NER/训练与导出
@@ -529,7 +531,7 @@ web/                   正式前端（Vue3 + Element Plus + ECharts，Vite 构�
 3. **失败即降级**：L2/L3 超时或不可用 → 保留 L1 结论并置 `degraded=true`，不让模型成为单点故障。
 4. **可复算可审计**：每条 finding 带 `rule_ids`、`confidence_vector`、`model_chain`、`reasons`；审计日志与 finding 一一对应，`prev_hash` 串成链，任何字段改动都会在 `/audit/verify` 暴露。
 5. **模块化便于扩展**：解析器、识别器、算子、导出格式都是小函数/协议 + 注册表，新增格式或模型不需改主流程。
-6. **导出可离线验签**：`/audit/export` 的 jsonl/json/csv 自带 `prev_hash` 与 `signature`，用 `python -m scripts.verify_export <文件>` 在任意机器复算整条哈希链（不连数据库、不起服务，密钥用 `--secret` 或 `FLOWMASK_AUDIT_SECRET`），断链会报出 `broken_at` 与原因；接口默认只导最近 200 条，脚本会把这种情况标为「部分链」，加 `--require-genesis` 则直接判失败。
+6. **导出可离线验签**：`/audit/export` 的 jsonl/json/csv 自带 `prev_hash` 与 `signature`，用 `python -m scripts.verify_export <文件>` 在任意机器复算整条哈希链（不连数据库、不起服务，密钥用 `--secret` 或 `FLOWMASK_AUDIT_SECRET`），断链会报出 `broken_at` 与原因；接口默认只导最近 200 条（脚本会把这种情况标为「部分链」，加 `--require-genesis` 则直接判失败），传 `after_id=0` 起按 `limit` 游标分页可导出完整链，响应头 `X-FlowMask-Audit-Next-After-Id` 给下一页游标、到链尾时缺省。
 7. **检测 → 告警 → 处置闭环**：任务落库 findings 的同时按级别生成告警（L3 紧急 / L2 重要 / L1 提示，阈值 `FLOWMASK_ALERT_MIN_LEVEL` 可调），每条告警带与四级脱敏模板同口径的处置建议；`/alerts` 支持过滤、汇总与认领/忽略，处理人与备注留痕。
 8. **扩展点有登记处**：`app/plugins.py` 把引擎（L1/L2/L3/NER）、隐私算子、解析器统一登记，`GET /plugins` 可查内置清单与就绪状态；第三方插件以 `FLOWMASK_PLUGINS=module:register` 在启动时接入，加载失败只记 `warnings`、不影响主链路——「可扩展」而不是「可被插件拖垮」。
 

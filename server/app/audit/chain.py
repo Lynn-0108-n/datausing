@@ -24,6 +24,9 @@ from ..core.db import Database, utcnow_iso
 
 GENESIS = "0" * 64
 
+#: 单次导出请求的硬上限：分页大小可调，但不允许一次拉出任意大的响应。
+EXPORT_MAX_LIMIT = 5000
+
 # 参与哈希计算的字段（签名与 prev_hash 本身不参与，否则循环依赖）
 HASH_FIELDS = (
     "task_id",
@@ -142,6 +145,38 @@ def list_entries(db: Database, limit: int = 50, offset: int = 0) -> tuple[list[d
             (limit, offset),
         ).fetchall()
     return [dict(row) for row in rows], int(total)
+
+
+def latest_entries(db: Database, limit: int = 200) -> tuple[list[dict[str, Any]], int]:
+    """按 id 正序返回最近 ``limit`` 条（默认 200，保持旧导出行为）。"""
+    limit = max(1, min(int(limit), EXPORT_MAX_LIMIT))
+    with db.connect() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        rows = conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return list(reversed([dict(row) for row in rows])), int(total)
+
+
+def export_entries(
+    db: Database, *, after_id: int = 0, limit: int = 200
+) -> tuple[list[dict[str, Any]], int, int | None]:
+    """按 id 正序游标导出，供全量导出分页使用。
+
+    返回 ``(rows, total, next_after_id)``：上一页最后一条的 id 作为下一页的
+    ``after_id``；``next_after_id is None`` 表示已到链尾。多取一条用于判断是否还有下一页，
+    避免调用方为「恰好整除」多跑一次空请求。
+    """
+    limit = max(1, min(int(limit), EXPORT_MAX_LIMIT))
+    after_id = max(0, int(after_id))
+    with db.connect() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+        rows = conn.execute(
+            "SELECT * FROM audit_log WHERE id > ? ORDER BY id ASC LIMIT ?",
+            (after_id, limit + 1),
+        ).fetchall()
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    next_after_id = page[-1]["id"] if has_more and page else None
+    return [dict(row) for row in page], int(total), next_after_id
 
 
 def verify_chain(db: Database, secret: str | None = None) -> dict[str, Any]:
