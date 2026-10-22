@@ -81,6 +81,8 @@ def reject_safe_mask_level(mask_level: str | None) -> None:
 
 
 _UPLOAD_CHUNK = 64 * 1024
+# 新版本 Starlette 把常量改名为 HTTP_413_CONTENT_TOO_LARGE，旧版本没有，取个兼容值
+_PAYLOAD_TOO_LARGE = getattr(status, "HTTP_413_CONTENT_TOO_LARGE", 413)
 
 
 async def read_upload_limited(upload: UploadFile, max_bytes: int) -> bytes:
@@ -94,7 +96,7 @@ async def read_upload_limited(upload: UploadFile, max_bytes: int) -> bytes:
         total += len(chunk)
         if total > max_bytes:
             raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                status_code=_PAYLOAD_TOO_LARGE,
                 detail=f"文件超过上限 {max_bytes // (1024 * 1024)} MB",
             )
         chunks.append(chunk)

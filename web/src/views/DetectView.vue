@@ -9,6 +9,9 @@ const SAMPLE = `客户张三，手机 13800138000，身份证 11010519491231002X
 const NER_SAMPLE = "张三昨天从福州赶过来，和李四在厦门大学碰了面，商量下个季度的采购方案。";
 
 const text = ref(SAMPLE);
+// 本次结果对应的原文快照：上传文件检测时没有原文，不能拿输入框内容去套文件的高亮区间
+const detectSource = ref(SAMPLE);
+const fileLabel = ref("");
 const maskLevel = ref("");
 const minLevel = ref("SAFE");
 const enableL2 = ref(false);
@@ -28,7 +31,11 @@ const nerTitle = computed(() =>
 
 const findings = computed(() => (result.value ? result.value.findings : []));
 const byLevel = computed(() => (result.value ? result.value.by_level : {}));
-const originalHtml = computed(() => (result.value ? renderHighlight(text.value, flattenSpans()) : ""));
+const originalHtml = computed(() => {
+  if (!result.value) return "";
+  if (!detectSource.value) return "（文件检测不展示原文：服务端不落原文，右侧为脱敏副本）";
+  return renderHighlight(detectSource.value, flattenSpans());
+});
 const maskedHtml = computed(() => escape(maskedDocumentText(result.value?.masked_document)));
 
 function escape(value) {
@@ -53,14 +60,17 @@ async function runDetect() {
   }
   loading.value = true;
   try {
+    const snapshot = text.value;
     result.value = await api.detectText({
-      text: text.value,
+      text: snapshot,
       enable_l2: enableL2.value,
       enable_l3: enableL3.value,
       enable_ner: enableNer.value,
       mask_level: maskLevel.value || null,
       min_level: minLevel.value,
     });
+    detectSource.value = snapshot;
+    fileLabel.value = "";
   } catch (err) {
     ElMessage.error(`检测失败：${err}`);
   } finally {
@@ -72,8 +82,15 @@ async function upload(fileEntry) {
   if (!fileEntry) return;
   loading.value = true;
   try {
-    result.value = await api.detectFile(fileEntry);
-    text.value = `${fileEntry.name}（${result.value.content_type}，${result.value.segments} 个片段）`;
+    result.value = await api.detectFile(fileEntry, {
+      enableL2: enableL2.value,
+      enableL3: enableL3.value,
+      enableNer: enableNer.value,
+      maskLevel: maskLevel.value || "",
+      minLevel: minLevel.value,
+    });
+    detectSource.value = "";
+    fileLabel.value = fileEntry.name;
     ElMessage.success("文件解析并检测完成");
   } catch (err) {
     ElMessage.error(`上传失败：${err}`);
@@ -154,6 +171,7 @@ onMounted(async () => {
       左右对照
       <span class="hint" v-if="result">
         {{ result.content_type }} · {{ result.segments }} 个片段 · 耗时 {{ result.duration_ms }}ms
+        <template v-if="fileLabel"> · {{ fileLabel }}</template>
         <template v-if="result.degraded"> · 已降级</template>
       </span>
     </div>

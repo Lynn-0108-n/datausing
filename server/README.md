@@ -59,7 +59,7 @@ scripts\stop_local.cmd                            # 停止全部
 ### 2.2 手动启动（分步调试用）
 
 ```powershell
-python -m pytest -o addopts="" -q    # 431 个用例（430 通过 + 1 跳过）
+python -m pytest -o addopts="" -q    # 441 个用例（440 通过 + 1 跳过）
 python -m bench --markdown-out ../docs/性能报告.md   # 性能基准（L1/端到端/L2；加 --l3-endpoint 测 L3）
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
 # 构建正式前端（可选，需 Node 18+；产物在 ../web/dist）
@@ -381,6 +381,8 @@ python -m app.evaluate     # 默认 L1 only，几秒钟出结果
 | GET | `/plugins` | 已注册的引擎 / 算子 / 解析器（含第三方插件加载状态与 `warnings`） |
 
 鉴权：设置 `FLOWMASK_API_TOKEN` 后，`/api/v1/*` 需 `Authorization: Bearer <token>`；留空即本机演示模式。
+前端（`web/` 与内置单页）会自动从浏览器 `localStorage.flowmask_token` 读取该 token 并加到请求头；
+未设置时 401 会提示去 localStorage 配置，不会静默失败。
 
 ## 6. 隐私增强导出（差分隐私 + l-多样性）
 
@@ -503,7 +505,7 @@ l3_training/         L3 指令微调：金标→指令样本、LoRA 训练、权
   l3_service/          L3 推理服务（mock / hf / instruct 后端 + /v1/judge”）
   samples/             自带示例抓包生成脚本与 demo-traffic.pcap
   eval/                评测集（351 条主集 + 200 条 NER 压力集）与评测说明
-  tests/               431 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表
+  tests/               441 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、前端与脚本静态回归
   pyproject.toml
   requirements.txt     运行依赖（固定版本）
   requirements-ml.txt  可选：L2/L3/NER/训练与导出

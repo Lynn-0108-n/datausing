@@ -36,17 +36,34 @@ $text = [System.IO.File]::ReadAllText($script).Replace("`r`n", "`n").Replace("`r
 
 
 $target = "$User@$Server"
-# 一次 scp 传两个文件（文件名已正确），一次 ssh 执行；ssh 用 -t 以便 sudo 能输入密码
-$cmds = @(
-  "scp `"$Binary`" `"$lfScript`" ${target}:$RemoteDir/",
-  "ssh -t $target `"cd $RemoteDir && mv -f netmon-linux netmon-linux.new && chmod +x update-netmon.sh && ./update-netmon.sh -b ./netmon-linux.new -c $Config -s $Service -p $Port`""
+
+# 参数校验：这些值会进入远端 shell 命令，禁止空格/引号/分号等可注入字符
+$localChecks = @(
+  @{ Name = "Server"; Value = $Server; Pattern = '^[A-Za-z0-9._-]+$' },
+  @{ Name = "User"; Value = $User; Pattern = '^[A-Za-z0-9._-]+$' },
+  @{ Name = "RemoteDir"; Value = $RemoteDir; Pattern = '^[A-Za-z0-9._~/-]+$' },
+  @{ Name = "Config"; Value = $Config; Pattern = '^[A-Za-z0-9._~/-]+$' },
+  @{ Name = "Service"; Value = $Service; Pattern = '^[A-Za-z0-9._-]+$' }
 )
+foreach ($c in $localChecks) {
+  if ($c.Value -notmatch $c.Pattern) {
+    throw "参数 $($c.Name) 含非法字符：$($c.Value)（只允许字母、数字、._~/-）"
+  }
+}
+
+$remoteCmd = "cd $RemoteDir && mv -f netmon-linux netmon-linux.new && chmod +x update-netmon.sh && ./update-netmon.sh -b ./netmon-linux.new -c $Config -s $Service -p $Port"
 
 Write-Host "目标服务器：$target" -ForegroundColor Cyan
 Write-Host "本地二进制：$Binary"
-foreach ($c in $cmds) {
-  Write-Host "  $c" -ForegroundColor DarkGray
-  if (-not $DryRun) { Invoke-Expression $c }
+if ($DryRun) {
+  Write-Host "  scp `"$Binary`" `"$lfScript`" ${target}:$RemoteDir/" -ForegroundColor DarkGray
+  Write-Host "  ssh -t $target `"$remoteCmd`"" -ForegroundColor DarkGray
+  Write-Host "（演练模式：未实际执行）" -ForegroundColor Yellow
+} else {
+  # 参数以数组传参，不把命令字符串交给 PowerShell 二次解析（避免注入）
+  & scp -- $Binary $lfScript "${target}:$RemoteDir/"
+  if ($LASTEXITCODE -ne 0) { throw "scp 失败（退出码 $LASTEXITCODE）" }
+  & ssh -t -- $target $remoteCmd
+  if ($LASTEXITCODE -ne 0) { throw "ssh 失败（退出码 $LASTEXITCODE）" }
+  Write-Host "上传并更新完成；如失败可运行：ssh $target '$RemoteDir/update-netmon.sh --rollback'" -ForegroundColor Green
 }
-if ($DryRun) { Write-Host "（演练模式：未实际执行）" -ForegroundColor Yellow }
-else { Write-Host "上传并更新完成；如失败可运行：ssh $target '$RemoteDir/update-netmon.sh --rollback'" -ForegroundColor Green }

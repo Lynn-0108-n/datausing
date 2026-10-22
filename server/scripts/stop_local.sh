@@ -11,6 +11,7 @@ if [[ ! -d "$RUN_DIR" ]]; then
 fi
 
 stopped=0
+skipped=0
 shopt -s nullglob
 for pid_file in "$RUN_DIR"/*.pid; do
   name="$(basename "$pid_file" .pid)"
@@ -21,6 +22,14 @@ for pid_file in "$RUN_DIR"/*.pid; do
     continue
   fi
   if kill -0 "$pid" 2>/dev/null; then
+    # pid 可能被系统复用：先确认命令行确实来自 FlowMask，再结束进程
+    cmdline="$(ps -o command= -p "$pid" 2>/dev/null || true)"
+    if [[ ! "$cmdline" =~ (uvicorn|app\.main|l2_service|l3_service|app\.api) ]]; then
+      echo "[flowmask] $name pid=$pid 命令行不像 FlowMask 进程，跳过停止（只删除记录）：$cmdline" >&2
+      skipped=$((skipped + 1))
+      rm -f "$pid_file"
+      continue
+    fi
     kill "$pid" 2>/dev/null || true
     for _ in $(seq 1 20); do
       kill -0 "$pid" 2>/dev/null || break
@@ -37,4 +46,4 @@ for pid_file in "$RUN_DIR"/*.pid; do
   rm -f "$pid_file"
 done
 
-echo "[flowmask] 完成：本次停止 $stopped 个进程"
+echo "[flowmask] 完成：本次停止 $stopped 个进程，跳过 $skipped 个不属于 FlowMask 的 pid"

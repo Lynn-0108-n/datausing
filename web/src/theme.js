@@ -79,7 +79,9 @@ export function toggleTheme() {
   const next = theme.value === "dark" ? "light" : "dark";
   applyTheme(next);
   // 同步到服务端（按操作人存），失败只影响"换浏览器记住"，不影响本次使用
-  api.savePreference(next, operator.value).catch(() => {});
+  api.savePreference(next, operator.value).catch((err) => {
+    console.warn("主题偏好同步失败（仅本机生效）：", err);
+  });
   return next;
 }
 

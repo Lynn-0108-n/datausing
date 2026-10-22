@@ -14,7 +14,7 @@ TEXT='客户张三，手机 13800138000，身份证 11010519491231002X，收货�
 say "1/6 即时检测"
 curl -sS -X POST "$API/detect" -H "Content-Type: application/json" \
   --data-binary "$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "$TEXT")" \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(f"  [OK]   分级 {d[\"level\"]}，类别 {d[\"types\"]}")'
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); fs=d.get("findings") or []; lv=fs[0]["level"] if fs else "SAFE"; tp=",".join(fs[0].get("types") or []) if fs else "-"; print(f"  [OK]   分级 {lv}，类别 {tp}，命中 {len(fs)} 条")'
 
 say "2/6 建任务 + 审计链"
 TASK=$(curl -sS -X POST "$API/tasks/text" -H "Content-Type: application/json" \

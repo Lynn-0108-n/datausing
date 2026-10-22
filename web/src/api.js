@@ -1,7 +1,20 @@
 const BASE = "/api/v1";
 
+// 服务端配了 FLOWMASK_API_TOKEN 时，所有请求都要带 Bearer；
+// 前端不内置登录页，运维在浏览器 localStorage 里写 flowmask_token 即可（README 有说明）。
+function authHeaders(base = {}) {
+  const headers = { ...base };
+  try {
+    const token = window.localStorage.getItem("flowmask_token");
+    if (token) headers.Authorization = `Bearer ${token}`;
+  } catch {
+    // 隐私模式禁用 localStorage 时忽略
+  }
+  return headers;
+}
+
 async function request(path, options = {}) {
-  const res = await fetch(BASE + path, options);
+  const res = await fetch(BASE + path, { ...options, headers: authHeaders(options.headers) });
   const text = await res.text();
   let body = null;
   try {
@@ -10,15 +23,18 @@ async function request(path, options = {}) {
     body = { raw: text };
   }
   if (!res.ok) {
-    const detail = body && (body.detail || body.raw) ? body.detail || body.raw : res.statusText;
+    let detail = body && (body.detail || body.raw) ? body.detail || body.raw : res.statusText;
+    if (res.status === 401) {
+      detail = "缺少或错误的 API Token：请在浏览器 localStorage 设置 flowmask_token（见 README）";
+    }
     throw new Error(`${res.status} ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
   }
   return body;
 }
 
-function jsonBody(data) {
+function jsonBody(data, method = "POST") {
   return {
-    method: "POST",
+    method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   };
@@ -34,7 +50,19 @@ export const api = {
   health: () => request("/health"),
   formats: () => request("/formats"),
   detectText: (payload) => request("/detect", jsonBody(payload)),
-  detectFile: (file) => request("/detect/file", formBody(file)),
+  detectFile: (file, opts = {}) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    const qs = new URLSearchParams();
+    if (opts.enableL2) qs.set("enable_l2", "true");
+    if (opts.enableL3) qs.set("enable_l3", "true");
+    if (opts.enableNer !== undefined && opts.enableNer !== null) {
+      qs.set("enable_ner", opts.enableNer ? "true" : "false");
+    }
+    if (opts.maskLevel) qs.set("mask_level", opts.maskLevel);
+    if (opts.minLevel) qs.set("min_level", opts.minLevel);
+    return request(`/detect/file?${qs.toString()}`, { method: "POST", body: fd });
+  },
 
   createTaskText: (text) => request("/tasks/text", jsonBody({ text })),
   createTaskFile: (file) => request("/tasks", formBody(file)),
@@ -70,7 +98,7 @@ export const api = {
     request("/preferences", { headers: operatorId ? { "X-Operator-Id": operatorId } : {} }),
   savePreference: (theme, operatorId) =>
     request("/preferences", {
-      ...jsonBody({ theme }),
+      ...jsonBody({ theme }, "PUT"),
       headers: { "Content-Type": "application/json", "X-Operator-Id": operatorId || "local" },
     }),
   resetPreference: (operatorId) =>
