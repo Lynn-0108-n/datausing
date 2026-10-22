@@ -59,7 +59,7 @@ scripts\stop_local.cmd                            # 停止全部
 ### 2.2 手动启动（分步调试用）
 
 ```powershell
-python -m pytest -o addopts="" -q    # 507 个用例（502 通过 + 5 跳过；4 个性能预算用例需 FLOWMASK_RUN_PERF=1）
+python -m pytest -o addopts="" -q    # 518 个用例（513 通过 + 5 跳过；4 个性能预算用例需 FLOWMASK_RUN_PERF=1）
 python -m bench --markdown-out ../docs/性能报告.md   # 性能基准（L1/端到端/L2；加 --l3-endpoint 测 L3）
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
 # 构建正式前端（可选，需 Node 18+；产物在 ../web/dist）
@@ -453,7 +453,7 @@ dumpcap -i 1 -w data/live.pcapng -b filesize:10240   # pcapng 同样是支持的
 | `FLOWMASK_L3_ENDPOINT` | `http://127.0.0.1:8092/v1/judge` | L3 服务地址（`l3_service`） |
 | `FLOWMASK_L3_MODEL` | `qwen3guard-gen-0.6b` | 模型名（仅展示/日志用） |
 | `FLOWMASK_L3_MODEL_DIR` | `server/models/qwen3guard-gen-0.6b` | 本地权重目录（ModelScope 下载到此处；instruct 模式指向 `qwen2.5-1.5b-instruct`） |
-| `FLOWMASK_L3_DEVICE` / `FLOWMASK_L3_DTYPE` | `auto` / `auto` | `cuda`/`cpu`；`auto`=GPU bf16、CPU fp32 |
+| `FLOWMASK_L3_DEVICE` / `FLOWMASK_L3_DTYPE` | `auto` / `auto` | 设备：`cpu`/`cuda`/`cuda:0`；`auto`=有 CUDA 用 GPU、否则 CPU；显式 cuda 但无 GPU 时自动回退 CPU 并告警。dtype：`auto`=GPU bf16、CPU fp32（4B 权重建议显式 `bf16`） |
 | `FLOWMASK_L3_MAX_TARGET` | `L2` | L3 升级上限；设 `L3` 才允许抬到高危 |
 | `FLOWMASK_L3_TRUST_LEVEL_HINT` | `1` | 是否采信指令模型的分级建议 |
 | `FLOWMASK_L3_CATEGORY_RAISE` | `0` | 类别感知（点出 PII 即抬中危）；实测会显著降准确率，默认关 |
@@ -508,7 +508,7 @@ l3_training/         L3 指令微调：金标→指令样本、LoRA 训练、权
   l3_service/          L3 推理服务（mock / hf / instruct 后端 + /v1/judge”）
   samples/             自带示例抓包生成脚本与 demo-traffic.pcap
   eval/                评测集（351 条主集 + 200 条 NER 压力集）与评测说明
-  tests/               507 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、长文本性能、前端与脚本静态回归
+  tests/               518 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、长文本性能、前端与脚本静态回归
   pyproject.toml
   requirements.txt     运行依赖（固定版本）
   requirements-ml.txt  可选：L2/L3/NER/训练与导出

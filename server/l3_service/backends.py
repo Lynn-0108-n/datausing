@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
@@ -211,6 +212,33 @@ def _resolve_dtype(torch, device: str):
     return torch.bfloat16 if device != "cpu" else torch.float32
 
 
+def _dtype_label(dtype) -> str:
+    """把 ``torch.dtype`` 转成 ``bf16``/``fp16``/``fp32`` 这类人读形式（``/v1/model`` 用）。"""
+    if dtype is None:
+        return ""
+    return str(dtype).replace("torch.", "")
+
+
+def _resolve_device(torch, requested: str) -> str:
+    """把 ``FLOWMASK_L3_DEVICE`` 解析成实际设备，并保证"请求 GPU 但机器没有 GPU"时不崩。
+
+    可选值：``auto``（默认，有 CUDA 就用 GPU）| ``cpu`` | ``cuda`` | ``cuda:0`` 等。
+    需求 2.9 的「4B GPU 可选加速」就是靠这个开关 + ``FLOWMASK_L3_MODEL_DIR`` 指到 4B 权重：
+    同一份代码既能跑 0.6B/1.5B，也能跑 4B，不需要改代码。
+    """
+    dev = (requested or "auto").strip().lower()
+    if dev in {"auto", ""}:
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    if dev.startswith("cuda") and not torch.cuda.is_available():
+        # 配置写了 cuda 但本机没有可用 GPU：退回 CPU 并把原因说清楚，
+        # 否则 from_pretrained(...).to("cuda") 会抛一个与根因无关的 CUDA 错误。
+        logging.getLogger(__name__).warning(
+            "FLOWMASK_L3_DEVICE=%s 但本机没有可用 CUDA，已回退 CPU 推理（速度会明显变慢）", requested
+        )
+        return "cpu"
+    return dev
+
+
 class TransformersGuardBackend:
     """Qwen3Guard-Gen 系列（transformers）后端；按需懒加载，失败时给可照做的提示。"""
 
@@ -222,6 +250,7 @@ class TransformersGuardBackend:
         self._tokenizer = None
         self._model = None
         self._torch = None
+        self._dtype = None
         # 同一批样本会反复过同一审策略矩阵，缓存判定结果能把矩阵耗时压到 1/N
         self._cache: dict[str, JudgeResult] = {}
         self._cache_limit = 512
@@ -242,18 +271,25 @@ class TransformersGuardBackend:
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
             self._torch = torch
+            # 先定设备再定 dtype：device=auto 且无 GPU 时必须按 CPU 走 fp32，
+            # 否则会拿 bf16 在 CPU 上慢一半；请求 cuda 但无 GPU 时 _resolve_device 已回退。
+            self.device = _resolve_device(torch, self.device)
             dtype = _resolve_dtype(torch, self.device)
+            self._dtype = dtype
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_dir, trust_remote_code=True)
             self._model = AutoModelForCausalLM.from_pretrained(
                 self.model_dir, torch_dtype=dtype, trust_remote_code=True
             )
-            if self.device == "auto":
-                self.device = "cuda" if torch.cuda.is_available() else "cpu"
-            self._model.to(self.device)
-            self._model.eval()
+            self._model.to(self.device).eval()
 
     def describe(self) -> dict[str, object]:
-        return {"mode": "hf", "model": self.name, "model_dir": self.model_dir, "device": self.device}
+        return {
+            "mode": "hf",
+            "model": self.name,
+            "model_dir": self.model_dir,
+            "device": self.device,
+            "dtype": _dtype_label(getattr(self, "_dtype", None)),
+        }
 
     # ---- 判定 -----------------------------------------------------------
     def _build_prompt(self, text: str) -> str:
@@ -344,6 +380,7 @@ class InstructJudgeBackend(TransformersGuardBackend):
             "model": self.name,
             "model_dir": self.model_dir,
             "device": self.device,
+            "dtype": _dtype_label(getattr(self, "_dtype", None)),
         }
 
     def _build_prompt(self, text: str) -> str:

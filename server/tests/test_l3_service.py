@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -18,7 +19,10 @@ from l3_service.backends import (  # noqa: E402
     InstructJudgeBackend,
     JudgeResult,
     MockGuardBackend,
+    TransformersGuardBackend,
+    _dtype_label,
     _parse_instruct_output,
+    _resolve_device,
     build_backend,
     extract_categories,
     parse_guard_text,
@@ -233,3 +237,68 @@ def test_judge_contract_includes_categories_and_level() -> None:
     assert body["categories"] == ["PII", "ID_CARD"]
     assert body["level"] == "L2"
     assert body["degraded"] is False
+
+
+class _FakeCuda:
+    def __init__(self, available: bool) -> None:
+        self._available = available
+
+    def is_available(self) -> bool:
+        return self._available
+
+
+class _FakeTorch:
+    """只实现 ``_resolve_device`` 需要的 ``cuda.is_available()``，测试不依赖真 GPU。"""
+
+    def __init__(self, available: bool) -> None:
+        self.cuda = _FakeCuda(available)
+
+
+@pytest.mark.parametrize(
+    ("requested", "available", "expected"),
+    [
+        ("auto", True, "cuda"),
+        ("auto", False, "cpu"),
+        ("", False, "cpu"),
+        ("cuda", True, "cuda"),
+        ("cuda:0", True, "cuda:0"),
+        ("cuda", False, "cpu"),
+        ("cpu", True, "cpu"),
+        ("mps", False, "mps"),
+    ],
+)
+def test_resolve_device(requested: str, available: bool, expected: str) -> None:
+    """需求 2.9：设备开关既能用 4B 权重上 GPU，也要在没有 GPU 的机器上安全回退。"""
+    assert _resolve_device(_FakeTorch(available), requested) == expected
+
+
+def test_resolve_device_warns_when_cuda_missing(caplog) -> None:
+    with caplog.at_level(logging.WARNING):
+        assert _resolve_device(_FakeTorch(False), "cuda") == "cpu"
+    assert any("回退 CPU" in record.getMessage() for record in caplog.records)
+
+
+def test_optional_4b_model_dir_switch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """2.9 的可选开关：FLOWMASK_L3_MODEL_DIR 指到 4B 权重 + DEVICE 指定设备即生效。"""
+    four_b = tmp_path / "qwen3guard-gen-4b"
+    four_b.mkdir()
+    (four_b / "config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("FLOWMASK_L3_MODE", "auto")
+    monkeypatch.setenv("FLOWMASK_L3_MODEL_DIR", str(four_b))
+    monkeypatch.setenv("FLOWMASK_L3_DEVICE", "cuda:0")
+    backend = build_backend()
+    assert isinstance(backend, TransformersGuardBackend)
+    desc = backend.describe()
+    assert desc["model_dir"] == str(four_b)
+    assert desc["device"] == "cuda:0"
+    assert desc["dtype"] == ""  # 懒加载：未载入权重前不知道实际 dtype
+
+
+def test_dtype_label_from_torch_repr() -> None:
+    class _FakeDtype:
+        def __str__(self) -> str:
+            return "torch.bfloat16"
+
+    assert _dtype_label(_FakeDtype()) == "bfloat16"
+    assert _dtype_label(None) == ""
+
