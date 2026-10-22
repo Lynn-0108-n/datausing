@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -63,6 +64,46 @@ def _parse_level(value: str) -> str:
     return normalized if normalized in LEVEL_VALUES else "L1"
 
 
+AUDIT_SECRET_FILE = "audit_secret.key"
+
+
+def _load_audit_secret(data_dir: Path) -> tuple[str, str]:
+    """确定审计链 HMAC 密钥，返回 ``(密钥, 来源)``。
+
+    优先级：``FLOWMASK_AUDIT_SECRET`` 环境变量 → ``<data_dir>/audit_secret.key``
+    → 首次启动自动生成并落盘 → 落盘失败时退回进程内存随机值。
+
+    不再内置固定演示密钥：固定密钥等于把签名私钥写在源码里，任何拿到源码的人都能
+    伪造一整条自洽的审计链。自动生成的密钥跟随数据目录，重启后仍能校验历史记录。
+    """
+    explicit = os.environ.get("FLOWMASK_AUDIT_SECRET", "").strip()
+    if explicit:
+        return explicit, "env"
+
+    path = data_dir / AUDIT_SECRET_FILE
+    try:
+        stored = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        stored = ""
+    except OSError:
+        # 目录不可读/被占用：不阻塞启动，代价是重启后旧链验不过，需人工处理
+        return secrets.token_hex(32), "memory"
+    if stored:
+        return stored, "file"
+
+    generated = secrets.token_hex(32)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(generated + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass  # Windows 上 chmod 语义有限，失败不影响功能
+    except OSError:
+        return generated, "memory"
+    return generated, "generated"
+
+
 @dataclass(frozen=True)
 class Settings:
     """一份不可变的运行配置快照。"""
@@ -71,8 +112,12 @@ class Settings:
     db_path: Path
     # 留空表示不鉴权（本机演示默认）；部署时设置 Bearer Token
     api_token: str
-    # 审计哈希链签名密钥（HMAC-SHA256）；生产环境应从密钥管理注入
+    # 审计哈希链签名密钥（HMAC-SHA256）；优先 FLOWMASK_AUDIT_SECRET，否则自动生成并落盘
     audit_secret: str
+    # 密钥来源：env（环境变量）/ file（已有密钥文件）/ generated（本次首次生成）/ memory（未持久化）
+    audit_secret_source: str
+    # 动态脱敏：可查看原文的操作人白名单（逗号分隔）；空表示都只能看脱敏副本
+    reveal_operators: str
     enable_l2: bool
     enable_l3: bool
     l2_endpoint: str
@@ -105,11 +150,14 @@ class Settings:
             "CORS_ORIGINS",
             "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8080",
         )
+        audit_secret, audit_secret_source = _load_audit_secret(data_dir)
         return cls(
             data_dir=data_dir,
             db_path=db_path,
             api_token=_env_str("API_TOKEN", ""),
-            audit_secret=_env_str("AUDIT_SECRET", "flowmask-demo-secret"),
+            audit_secret=audit_secret,
+            audit_secret_source=audit_secret_source,
+            reveal_operators=_env_str("REVEAL_OPERATORS", ""),
             enable_l2=_env_bool("ENABLE_L2", False),
             enable_l3=_env_bool("ENABLE_L3", False),
             l2_endpoint=_env_str("L2_ENDPOINT", "http://127.0.0.1:8091/v1/classify"),

@@ -30,7 +30,7 @@ COLUMNS = [
 
 
 def _secret() -> str:
-    """与写库方一致的 HMAC 密钥（测试环境为默认演示密钥）。"""
+    """与写库方一致的 HMAC 密钥（测试环境为数据目录下自动生成的密钥文件）。"""
     return get_settings().audit_secret
 
 
@@ -235,11 +235,44 @@ def test_main_returns_zero_for_valid_file(database, tmp_path: Path, capsys) -> N
     assert "离线验签通过" in out and "完整链" in out
 
 
-def test_main_default_secret_reads_settings(database, tmp_path: Path) -> None:
-    """不传 --secret 时走 FLOWMASK_AUDIT_SECRET（未设置则为演示密钥）。"""
+def test_main_default_secret_reads_settings(database, tmp_path: Path, capsys) -> None:
+    """不传 --secret 时走配置（环境变量或数据目录下的 audit_secret.key）。"""
     _append_three(database)
     path = _write_jsonl(tmp_path / "audit.jsonl", _ascending_rows(database))
     assert ve.main([str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "离线验签通过" in out
+    assert "密钥来源" in out
+
+
+def test_resolve_secret_prefers_cli_flag() -> None:
+    assert ve.resolve_secret("explicit-secret") == ("explicit-secret", "命令行 --secret")
+
+
+def test_resolve_secret_reports_key_file_source(tmp_env, monkeypatch) -> None:
+    """缺省密钥来自数据目录下的 audit_secret.key，来源文案要能说清。"""
+    monkeypatch.delenv("FLOWMASK_AUDIT_SECRET", raising=False)
+    get_settings.cache_clear()
+    secret, source = ve.resolve_secret()
+    assert secret == get_settings().audit_secret
+    assert source.startswith("密钥文件")
+    assert "audit_secret.key" in source
+
+
+def test_main_env_secret_takes_precedence(database, tmp_path: Path, monkeypatch, capsys) -> None:
+    """FLOWMASK_AUDIT_SECRET 优先于密钥文件，报告里要标明「环境变量」。"""
+    from app.core.config import get_settings
+
+    _append_three(database)
+    path = _write_jsonl(tmp_path / "audit.jsonl", _ascending_rows(database))
+
+    monkeypatch.setenv("FLOWMASK_AUDIT_SECRET", _secret())
+    get_settings.cache_clear()
+    try:
+        assert ve.main([str(path)]) == 0
+        assert "环境变量 FLOWMASK_AUDIT_SECRET" in capsys.readouterr().out
+    finally:
+        get_settings.cache_clear()
 
 
 def test_main_returns_one_for_tampered_file(database, tmp_path: Path, capsys) -> None:

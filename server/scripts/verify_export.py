@@ -8,7 +8,7 @@
 用法（在 ``server/`` 目录下）::
 
     python -m scripts.verify_export audit.jsonl
-    python -m scripts.verify_export audit.json --secret flowmask-demo-secret
+    python -m scripts.verify_export audit.json --secret <密钥>
     python -m scripts.verify_export audit.csv --json
 
 退出码：0 校验通过；1 断链或签名不符；2 文件或参数错误。
@@ -204,18 +204,33 @@ def verify_rows(
 
 
 def resolve_secret(explicit: str | None = None) -> tuple[str, str]:
-    """确定 HMAC 密钥：优先 ``--secret``，否则读配置（环境变量 FLOWMASK_AUDIT_SECRET）。"""
+    """确定 HMAC 密钥与来源文案：优先 ``--secret``，否则读配置。
+
+    配置来源由 ``Settings.audit_secret_source`` 决定：环境变量
+    ``FLOWMASK_AUDIT_SECRET`` / 密钥文件 / 内存随机（未持久化）。
+    """
     if explicit is not None:
-        return explicit, "--secret"
-    from app.core.config import get_settings
+        return explicit, "命令行 --secret"
+    from app.core.config import AUDIT_SECRET_FILE, get_settings
 
-    return get_settings().audit_secret, "配置（FLOWMASK_AUDIT_SECRET，缺省为演示密钥）"
+    settings = get_settings()
+    source = settings.audit_secret_source
+    if source == "env":
+        return settings.audit_secret, "环境变量 FLOWMASK_AUDIT_SECRET"
+    key_path = settings.data_dir / AUDIT_SECRET_FILE
+    if source == "file":
+        return settings.audit_secret, f"密钥文件 {key_path}"
+    if source == "generated":
+        return settings.audit_secret, f"密钥文件 {key_path}（本次首次生成）"
+    return settings.audit_secret, "内存随机（未持久化）"
 
 
-def format_report(result: dict[str, Any], path: Path) -> str:
+def format_report(result: dict[str, Any], path: Path, *, secret_source: str = "") -> str:
     """把校验结果排版成便于评审/演示阅读的多行文本。"""
     status = "通过" if result["ok"] else "失败"
     lines = [f"离线验签{status}：{path}"]
+    if secret_source:
+        lines.append(f"  密钥来源 {secret_source}")
     if result["total"] == 0:
         lines.append("  记录数 0（空导出，没有可校验的审计记录）")
         if not result["ok"]:
@@ -244,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--secret",
         default=None,
-        help="HMAC 密钥；缺省读配置 FLOWMASK_AUDIT_SECRET（未设置时为演示密钥）",
+        help="HMAC 密钥；缺省读配置 FLOWMASK_AUDIT_SECRET，未设置时用数据目录下的 audit_secret.key（首次自动生成）",
     )
     parser.add_argument(
         "--require-genesis",
@@ -256,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         rows = load_rows(args.path)
-        secret, _source = resolve_secret(args.secret)
+        secret, secret_source = resolve_secret(args.secret)
     except (ValueError, OSError) as exc:
         print(f"验签失败：{exc}", file=sys.stderr)
         return 2
@@ -265,9 +280,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         payload = dict(result)
         payload["path"] = str(args.path)
+        payload["secret_source"] = secret_source
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
-        print(format_report(result, args.path))
+        print(format_report(result, args.path, secret_source=secret_source))
     return 0 if result["ok"] else 1
 
 
