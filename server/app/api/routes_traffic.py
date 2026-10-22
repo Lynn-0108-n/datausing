@@ -177,18 +177,34 @@ def ingest_traffic(
 
 
 def _resolve_live_path(raw: str, settings: Settings) -> Path:
-    """把请求里的路径限制在数据目录/示例目录内，避免变成任意文件读取。"""
+    """把请求里的路径限制在数据目录/示例目录内，避免变成任意文件读取。
+
+    前端与 README 的默认值是 ``data/live.pcap``（相对 server/ 的写法），而
+    ``settings.data_dir`` 本身就是 ``server/data``；直接拼接会多出一层
+    ``server/data/data/live.pcap``，跟随线程安静地读不到任何报文。这里对相对
+    路径做多候选解析：先按「去掉 data/ 前缀」再拼数据目录，然后才退回按
+    server/ 根目录解析（支持 ``samples/demo-traffic.pcap``）。
+    """
     candidate = Path(raw)
-    if not candidate.is_absolute():
-        candidate = settings.data_dir / candidate
-    resolved = candidate.resolve()
-    allowed_roots = [settings.data_dir.resolve(), _SAMPLES_DIR.resolve()]
-    for root in allowed_roots:
-        if resolved == root or root in resolved.parents:
-            return resolved
+    roots = [settings.data_dir.resolve(), _SAMPLES_DIR.resolve()]
+    if candidate.is_absolute():
+        attempts = [candidate]
+    else:
+        normalized = raw.strip().replace("\\", "/")
+        stripped = normalized[len("data/") :] if normalized.startswith("data/") else ""
+        attempts = []
+        if stripped:
+            attempts.append(settings.data_dir / stripped)
+        attempts.append(settings.data_dir / candidate)
+        attempts.append(SERVER_DIR / candidate)
+    for attempt in attempts:
+        resolved = attempt.resolve()
+        for root in roots:
+            if resolved == root or root in resolved.parents:
+                return resolved
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
-        detail="实时跟随时抓包文件必须位于数据目录或其子目录下（如 data/live.pcap）",
+        detail="实时跟随时抓包文件必须位于数据目录或其子目录下（如 data/live.pcap、samples/demo-traffic.pcap）",
     )
 
 

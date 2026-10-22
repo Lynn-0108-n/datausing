@@ -293,6 +293,20 @@ def test_live_follow_and_stop(client, database, data_dir: Path, live_manager) ->
     assert "cleared" in cleared.json()
 
 
+def test_live_start_accepts_data_prefixed_relative_path(client, database, data_dir: Path, live_manager) -> None:
+    """前端/README 默认传 data/live.pcap，不能被解析成 data/data/live.pcap。"""
+    target = data_dir / "live-prefixed.pcap"
+    target.write_bytes(_pcap_header())
+    started = client.post(
+        "/api/v1/traffic/live/start",
+        json={"pcap_path": "data/live-prefixed.pcap", "interval_ms": 300, "window_s": 1.0},
+    )
+    assert started.status_code == 201, started.text
+    live_id = started.json()["live_id"]
+    assert Path(started.json()["pcap_path"]).resolve() == target.resolve()
+    assert client.post(f"/api/v1/traffic/live/{live_id}/stop").status_code == 200
+
+
 def test_live_rejects_path_outside_data_dir(client, database, live_manager) -> None:
     response = client.post(
         "/api/v1/traffic/live/start",
