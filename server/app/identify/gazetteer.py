@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -140,30 +141,43 @@ class PlaceMention:
     reason: str  # "suffix" / "direction"
 
 
+def _overlaps_sorted(taken: list[tuple[int, int]], start: int, end: int) -> bool:
+    """在「按 start 升序且互不重叠」的区间表里判断 [start, end) 是否与任一区间相交。
+
+    只查相邻两个区间即可：区间互不重叠，若前一个区间（start 最大的左侧区间）都不相交，
+    更靠左的区间 end 只会更小；右侧同理。
+    """
+    index = bisect_left(taken, (start,))
+    for position in (index - 1, index):
+        if 0 <= position < len(taken):
+            taken_start, taken_end = taken[position]
+            if start < taken_end and taken_start < end:
+                return True
+    return False
+
+
 def iter_place_mentions(text: str) -> list[PlaceMention]:
-    """扫描文本里的行政区地名，只保留有后缀或方位词作为依据的命中。"""
-    mentions: list[PlaceMention] = []
-    taken: list[tuple[int, int]] = []
+    """扫描文本里的行政区地名，只保留有后缀或方位词作为依据的命中。
 
-    def overlaps(start: int, end: int) -> bool:
-        return any(start < e and s < end for s, e in taken)
-
+    两轮扫描：先收「方位词 + 地名」，再收「地名 + 行政后缀」。同一个正则的 finditer
+    结果天然按位置升序且互不重叠，所以第二轮只需和第一轮区间做相交判断；
+    区间表用二分查找（原实现逐个线性扫描，地名密集长文本上退化成 O(n²)）。
+    """
+    directional: list[PlaceMention] = []
     for match in _DIRECTIONAL_RE.finditer(text):
         start, end = match.span(1)
-        if overlaps(start, end):
-            continue
-        mentions.append(PlaceMention(start, end, match.group(1), "direction"))
-        taken.append((start, end))
+        directional.append(PlaceMention(start, end, match.group(1), "direction"))
+    taken = [(mention.start, mention.end) for mention in directional]
 
+    mentions: list[PlaceMention] = list(directional)
     for match in re.finditer(_PLACE_ALT, text):
         start, end = match.span()
-        if overlaps(start, end):
+        if _overlaps_sorted(taken, start, end):
             continue
         # 只有当紧邻的后面出现行政后缀时，才算「有依据」
         if not re.match(_SUFFIX, text[end:]) and not re.match(r"\s*" + _SUFFIX, text[end:]):
             continue
         mentions.append(PlaceMention(start, end, match.group(0), "suffix"))
-        taken.append((start, end))
 
     mentions.sort(key=lambda item: item.start)
     return mentions

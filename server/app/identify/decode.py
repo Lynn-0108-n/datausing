@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+from bisect import bisect_left, insort
 from dataclasses import dataclass
 from urllib.parse import unquote
 
@@ -151,12 +152,28 @@ def decode_layers(value: str, *, max_depth: int = MAX_DECODE_DEPTH) -> tuple[str
     return current, ">".join(chain)
 
 
-def _candidate_spans(text: str) -> list[tuple[int, int]]:
-    """按优先级收集候选片段：hex 转义 > 纯 hex > 百分号 > base64（避免 hex 被 base64 抢走）。"""
-    found: list[tuple[int, int]] = []
+def _overlaps_found(found: list[tuple[int, int, str, str]], start: int, end: int) -> bool:
+    """在「按 start 升序且互不重叠」的已收片段表里判断 [start, end) 是否相交。
 
-    def overlaps(start: int, end: int) -> bool:
-        return any(start < e and s < end for s, e in found)
+    只查相邻两个可覆盖全部情况：区间互不重叠且有序，左侧只需看 start 最大的那个，
+    右侧只需看 start 最小的那个。
+    """
+    index = bisect_left(found, (start,))
+    for position in (index - 1, index):
+        if 0 <= position < len(found):
+            found_start, found_end = found[position][0], found[position][1]
+            if start < found_end and found_start < end:
+                return True
+    return False
+
+
+def _candidate_spans(text: str) -> list[tuple[int, int, str, str]]:
+    """按优先级收集候选片段：hex 转义 > 纯 hex > 百分号 > base64（避免 hex 被 base64 抢走）。
+
+    返回值里顺带带上首层解码结果（``final, chain``），供 :func:`iter_decoded_spans`
+    直接复用，避免同一片段解码两次。
+    """
+    found: list[tuple[int, int, str, str]] = []
 
     # 每个正则只接受「首层解码类型与之相符」的片段：
     # 否则一串 base64 候选可能被 hex 先解开，把编码链标错、也放过短 hex。
@@ -167,26 +184,24 @@ def _candidate_spans(text: str) -> list[tuple[int, int]]:
         (_BASE64_RE, "base64"),
     ):
         for match in pattern.finditer(text):
-            if overlaps(match.start(), match.end()):
+            start, end = match.span()
+            if _overlaps_found(found, start, end):
                 continue
             decoded = decode_layers(match.group(0))
             if decoded is None or decoded[1].split(">")[0] != expected:
                 continue
-            found.append((match.start(), match.end()))
-    found.sort()
+            final, chain = decoded
+            # 保持 found 按 start 有序（insort 即按元组第 1 项比较）
+            insort(found, (start, end, final, chain))
     return found
 
 
 def iter_decoded_spans(text: str) -> list[DecodedSpan]:
     """找出文本里所有可解码且解码结果像文本的片段（按出现顺序、互不重叠）。"""
-    spans: list[DecodedSpan] = []
-    for start, end in _candidate_spans(text):
-        decoded = decode_layers(text[start:end])
-        if decoded is None:
-            continue
-        final, chain = decoded
-        spans.append(DecodedSpan(start, end, final, chain))
-    return spans
+    return [
+        DecodedSpan(start, end, final, chain)
+        for start, end, final, chain in _candidate_spans(text)
+    ]
 
 
 def decoded_hits(text: str, detect) -> list[Hit]:
