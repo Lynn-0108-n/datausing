@@ -87,6 +87,13 @@ def test_free_text_name_without_field_key() -> None:
         assert hits[0].rule.startswith("name_free")
 
 
+def test_free_text_name_before_resignation_word() -> None:
+    """「张三离职…」句首人名：规则里的「离职」曾被损坏成 U+FFFD，该分支永不命中。"""
+    hits = [hit for hit in detect("张三离职需要交接客户资料。") if hit.type is EntityType.NAME]
+    assert hits, "「离职」前的句首人名漏检"
+    assert hits[0].value == "张三"
+
+
 def test_free_text_name_does_not_fire_on_common_words() -> None:
     """姓氏表 + 停用字只是启发式，普通词不能被人名规则误抓。"""
     cases = [
