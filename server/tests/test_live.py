@@ -346,3 +346,116 @@ def test_demo_pcap_still_imports(client, database) -> None:
     assert response.json()["sessions"] == 3
     # write_pcap 与测试里手工拼的 pcap 应能互相读取（帧结构约定一致）
     assert len(list(__import__("app.traffic", fromlist=["iter_packets"]).iter_packets(write_pcap([])))) == 0
+
+
+# ---------------- 长跑健壮性（体检清单 audit-core P2-5/P3-6/P3-7/P3-10） ----------------
+
+
+def test_follower_resets_after_file_rotated_shorter(tmp_path: Path) -> None:
+    """抓包工具轮转后文件变短：必须从头重读，而不是 seek 越界后永远读空。"""
+    path = tmp_path / "rotated.pcap"
+    frame = _synth_frame(40000, f"手机 {PHONE}")
+    path.write_bytes(_pcap_header() + _record(1.0, frame))
+    follower = PcapFollower(path)
+    assert len(follower.poll()) == 1
+
+    # 同路径换成更短的新文件（模拟 dumpcap 轮转）
+    path.write_bytes(_pcap_header())
+    assert follower.poll() == []
+    new_frame = _synth_frame(40001, "新正文")
+    with path.open("ab") as handle:
+        handle.write(_record(2.0, new_frame))
+    packets = follower.poll()
+    assert len(packets) == 1, "轮转后应从新文件头继续解析"
+
+
+def test_live_bounds_seen_and_pending(monkeypatch, tmp_path: Path) -> None:
+    """去重集合与待落库队列都要有上限，长时间失败不能无限吃内存。"""
+    from app.identify import DetectOptions
+    from app.traffic import live as live_mod
+    from app.traffic.pcap import RawPacket
+
+    monkeypatch.setattr(live_mod, "MAX_SEEN_KEYS", 5)
+    monkeypatch.setattr(live_mod, "MAX_PENDING_SEGMENTS", 3)
+    session = live_mod._LiveSession(
+        live_id="bounded",
+        pcap_path=tmp_path / "x.pcap",
+        source="live:x",
+        interval_ms=10,
+        window_s=999.0,
+        options=DetectOptions(),
+        db=None,  # type: ignore[arg-type]
+        pipeline=None,  # type: ignore[arg-type]
+    )
+    for index in range(10):
+        frame = _synth_frame(41000 + index, f"手机 {PHONE} #{index}")
+        live_mod._ingest_packets(session, [RawPacket(ts=float(index), linktype=1, frame=frame)])
+    assert len(session._seen) <= 5
+    assert len(session._pending) <= 3
+    assert session.dropped > 0
+
+
+def test_flush_window_requeues_on_create_failure(monkeypatch, tmp_path: Path) -> None:
+    """任务创建失败时正文不能丢：放回队头等下一个窗口重试。"""
+    from app.identify import DetectOptions
+    from app.parsers.base import Segment
+    from app.traffic import live as live_mod
+
+    monkeypatch.setattr(live_mod, "MAX_PENDING_SEGMENTS", 10)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("db is gone")
+
+    monkeypatch.setattr(live_mod, "create_task", boom)
+    session = live_mod._LiveSession(
+        live_id="retry",
+        pcap_path=tmp_path / "x.pcap",
+        source="live:x",
+        interval_ms=10,
+        window_s=0.1,
+        options=DetectOptions(),
+        db=None,  # type: ignore[arg-type]
+        pipeline=None,  # type: ignore[arg-type]
+        _pending=[Segment(path="$", text="正文一"), Segment(path="$", text="正文二")],
+    )
+    live_mod._flush_window(session)
+    assert [segment.text for segment in session._pending] == ["正文一", "正文二"]
+    assert "create_task" in session.last_error
+
+
+def test_live_concurrent_start_only_one_session(database, data_dir: Path, live_manager) -> None:
+    """并发 start 同一文件只能成功一个，否则会重复落库 findings/审计。"""
+    import threading
+
+    from app.identify import DetectionPipeline
+    from app.traffic.live import LiveError, get_live_manager
+
+    path = data_dir / "race.pcap"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(demo_pcap())
+    manager = get_live_manager()
+    outcomes: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def attempt() -> None:
+        barrier.wait()
+        try:
+            manager.start(
+                db=database,
+                pipeline=DetectionPipeline(),
+                pcap_path=path,
+                interval_ms=60,
+                window_s=0.5,
+                options=__import__("app.identify", fromlist=["DetectOptions"]).DetectOptions(),
+            )
+            outcomes.append("ok")
+        except LiveError:
+            outcomes.append("dup")
+
+    threads = [threading.Thread(target=attempt) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert sorted(outcomes) == ["dup", "ok"]
+    manager.stop_all()
