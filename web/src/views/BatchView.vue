@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
-import { api, LEVEL_COLORS } from "../api";
+import { api, downloadWithAuth, LEVEL_COLORS } from "../api";
 
 const MAX_FILES = 20;
 const files = ref([]);
@@ -151,6 +151,15 @@ async function openTask(row) {
   }
 }
 
+async function downloadTask(row) {
+  if (!row.taskId) return;
+  try {
+    await downloadWithAuth(api.taskExportUrl(row.taskId, "jsonl"), `flowmask-${row.taskId}.jsonl`);
+  } catch (err) {
+    ElMessage.error(`导出失败：${err}`);
+  }
+}
+
 function statusType(status) {
   if (status === "done") return "success";
   if (status === "failed" || status === "解析失败") return "danger";
@@ -238,13 +247,7 @@ onBeforeUnmount(() => {
         <el-table-column label="操作" width="150">
           <template #default="{ row }">
             <el-button link type="primary" size="small" :disabled="!row.taskId" @click="openTask(row)">查看</el-button>
-            <a
-              v-if="row.taskId"
-              class="export-link"
-              :href="api.taskExportUrl(row.taskId, 'jsonl')"
-              target="_blank"
-              rel="noreferrer"
-            >导出</a>
+            <el-button link type="success" size="small" :disabled="!row.taskId" @click="downloadTask(row)">导出</el-button>
           </template>
         </el-table-column>
         <el-table-column prop="error" label="错误" min-width="160" show-overflow-tooltip />
@@ -303,9 +306,5 @@ onBeforeUnmount(() => {
   font-family: Consolas, "Courier New", monospace;
   font-size: 12px;
   color: var(--muted);
-}
-.export-link {
-  margin-left: 10px;
-  font-size: 12px;
 }
 </style>

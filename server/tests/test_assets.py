@@ -10,9 +10,11 @@
 - 停止脚本必须先核对进程命令行，不能只信 pid 文件；
 - 启动脚本要先做端口试绑预检；
 - 上传脚本不能把变量拼进 Invoke-Expression；
-- 任务导出必须走 Blob 下载（能带 Authorization，也不被弹窗拦截）；
+- 任务导出必须走 Blob 下载（能带 Authorization，也不被弹窗拦截），且三个页面统一；
 - 批量结果的高危/中危要按 /stats 全量统计，不能只数前 100 条 findings；
-- 列表/轮询/详情请求要有序号保护，晚到的旧响应必须丢弃。
+- 列表/轮询/详情请求要有序号保护，晚到的旧响应必须丢弃；
+- PPT 生成脚本不能硬编码某台机器的桌面路径；
+- requirements 要写明 pypdf 是 PDF 解析的可选回退。
 """
 
 from pathlib import Path
@@ -87,16 +89,37 @@ def test_upload_script_does_not_use_invoke_expression():
     assert "Invoke-Expression" not in _read(deploy)
 
 
-def test_tasks_view_export_uses_blob_download_with_auth():
-    view = _read(WEB_SRC / "views" / "TasksView.vue")
-    # Blob + <a download>，不再先整份 fetch 再 window.open
-    assert "createObjectURL" in view
-    assert "revokeObjectURL" in view
-    assert 'document.createElement("a")' in view
-    assert "window.open(api.taskExportUrl" not in view
-    # 有 FLOWMASK_API_TOKEN 时导出也要带 Authorization，文件名优先取响应头
-    assert "authHeaders" in view
-    assert "Content-Disposition" in view
+def test_web_exports_use_authenticated_blob_download():
+    api_js = _read(WEB_SRC / "api.js")
+    # 统一的带鉴权下载入口：fetch + Authorization → Blob → <a download>
+    assert "export async function downloadWithAuth" in api_js
+    assert "authHeaders" in api_js
+    assert "createObjectURL" in api_js
+    assert "revokeObjectURL" in api_js
+    assert "Content-Disposition" in api_js
+    # 三个页面都调用它，不再裸 window.open / 裸 href（有 token 时带不上 Authorization）
+    for name in ("TasksView.vue", "BatchView.vue", "TrafficView.vue"):
+        view = _read(WEB_SRC / "views" / name)
+        assert "downloadWithAuth" in view, name
+        assert "window.open" not in view, name
+    assert 'href="api.taskExportUrl' not in _read(WEB_SRC / "views" / "BatchView.vue")
+    # 隐私导出也走同一入口
+    assert "downloadWithAuth(" in _read(WEB_SRC / "views" / "TasksView.vue")
+
+
+def test_tools_ppt_script_has_no_hardcoded_desktop_path():
+    script = _read(REPO_DIR / "tools" / "make_ppt_goal.py")
+    assert "31387" not in script
+    assert "FLOWMASK_PPT_OUT" in script
+    assert "Path.home()" in script
+
+
+def test_requirements_document_pdf_fallback():
+    requirements = _read(SERVER_DIR / "requirements.txt")
+    parser = _read(SERVER_DIR / "app" / "parsers" / "pdf_parser.py")
+    assert "pypdf" in parser  # 代码确实会回退到 pypdf
+    assert "pypdf" in requirements
+    assert "可选回退" in requirements
 
 
 def test_tasks_view_discards_stale_responses():

@@ -1,11 +1,14 @@
-﻿"""生成《FlowMask 设计目的与预期结果》初赛汇报 PPT。
+"""生成《FlowMask 设计目的与预期结果》初赛汇报 PPT。
 
-复用 tools/make_ppt.py 里的版式工具（16:9、微软雅黑、统一配色），
-输出到桌面的 FlowMask-设计目的与预期结果.pptx。
+复用 tools/make_ppt.py 里的版式工具（16:9、微软雅黑、统一配色）。
+默认输出到当前用户桌面的 FlowMask-设计目的与预期结果.pptx；可用环境变量
+``FLOWMASK_PPT_OUT`` 或命令行第一个参数指定输出文件路径（目录会自动创建）。
 """
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
@@ -36,8 +39,19 @@ from make_ppt import (
     textbox,
 )
 
-DESKTOP = Path(r"D:\31387\Desktop")
-OUT = DESKTOP / "FlowMask-设计目的与预期结果.pptx"
+DEFAULT_NAME = "FlowMask-设计目的与预期结果.pptx"
+
+
+def default_out() -> Path:
+    """确定输出文件路径：FLOWMASK_PPT_OUT > 当前用户桌面。
+
+    不再硬编码某台机器的桌面绝对路径：换机或在服务器上运行时
+    原路径不存在，脚本会直接失败。
+    """
+    explicit = os.environ.get("FLOWMASK_PPT_OUT", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    return Path.home() / "Desktop" / DEFAULT_NAME
 
 
 def s1_cover(prs):
@@ -540,7 +554,7 @@ def s16_end(prs, page):
     chips(slide, Inches(1.2), Inches(6.2), ["272 测试", "99.7%", "0.0% 漏检", "50.5 MB exe"])
 
 
-def build() -> None:
+def build(out: Path | None = None) -> None:
     prs = new_deck()
     s1_cover(prs)
     s2_overview(prs, 2)
@@ -558,10 +572,11 @@ def build() -> None:
     s14_next(prs, 14)
     s15_verify(prs, 15)
     s16_end(prs, 16)
-    DESKTOP.mkdir(parents=True, exist_ok=True)
-    prs.save(OUT)
-    print(f"已生成：{OUT}（{OUT.stat().st_size / 1024:.1f} KB，{len(prs.slides.__iter__.__self__._sldIdLst)} 页）")
+    target = Path(out).expanduser() if out is not None else default_out()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    prs.save(target)
+    print(f"已生成：{target}（{target.stat().st_size / 1024:.1f} KB，{len(prs.slides.__iter__.__self__._sldIdLst)} 页）")
 
 
 if __name__ == "__main__":
-    build()
+    build(Path(sys.argv[1]) if len(sys.argv) > 1 else None)

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
-import { api, LEVEL_COLORS, LEVEL_LABELS } from "../api";
+import { api, downloadWithAuth, LEVEL_COLORS, LEVEL_LABELS } from "../api";
 
 const formats = ref(null);
 const file = ref(null);
@@ -90,9 +90,13 @@ async function waitTask(taskId) {
   ElMessage.warning("任务仍在执行，请稍后到「任务与审计链」查看");
 }
 
-function exportFindings(fmt) {
+async function exportFindings(fmt) {
   if (!task.value) return;
-  window.open(api.taskExportUrl(task.value.id, fmt), "_blank");
+  try {
+    await downloadWithAuth(api.taskExportUrl(task.value.id, fmt), `flowmask-${task.value.id}.${fmt}`);
+  } catch (err) {
+    ElMessage.error(`导出失败：${err}`);
+  }
 }
 
 function levelColor(level) {

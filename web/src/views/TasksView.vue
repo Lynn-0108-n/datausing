@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
-import { api, authHeaders } from "../api";
+import { api, downloadWithAuth } from "../api";
 
 const tasks = ref([]);
 const findings = ref([]);
@@ -92,46 +92,13 @@ async function createFromFile(uploadFile) {
   }
 }
 
-function exportUrl(fmt) {
-  return current.value ? api.taskExportUrl(current.value.id, fmt) : "#";
-}
-
-// 文件名：优先 Content-Disposition 的 filename*=UTF-8''（支持中文名），退化到 filename="..."。
-function fileNameFromDisposition(header) {
-  if (!header) return "";
-  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(header);
-  if (utf8) {
-    try {
-      return decodeURIComponent(utf8[1].trim());
-    } catch {
-      /* 编码异常就退回 filename= */
-    }
-  }
-  const plain = /filename="?([^";]+)"?/i.exec(header);
-  return plain ? plain[1].trim() : "";
-}
-
-// 导出走 fetch 拿 Blob 再 <a download> 落盘：
-// - 不再先整份拉一遍再 window.open（弹窗可能被拦、有 token 时 window.open 带不上 Authorization）；
-// - 文件名优先取服务端 Content-Disposition，取不到用 flowmask-<id>.<fmt>。
+// 导出走带鉴权的 Blob 下载（见 api.js downloadWithAuth）：
+// 有 token 时也能带上 Authorization，文件名优先取服务端 Content-Disposition。
 async function copyExport(fmt) {
   if (!current.value) return;
   const id = current.value.id;
-  const url = api.taskExportUrl(id, fmt);
   try {
-    const res = await fetch(url, { headers: authHeaders() });
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    const blob = await res.blob();
-    const name = fileNameFromDisposition(res.headers.get("Content-Disposition")) || `flowmask-${id}.${fmt}`;
-    const objectUrl = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = objectUrl;
-    link.download = name;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    // click 后立刻 revoke 在部分浏览器会取不到内容，放到下一轮事件循环再清理
-    setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    await downloadWithAuth(api.taskExportUrl(id, fmt), `flowmask-${id}.${fmt}`);
   } catch (err) {
     ElMessage.error(`导出失败：${err}`);
   }
@@ -153,7 +120,10 @@ async function privacyExport() {
       duration: 8000,
       message: `隐私导出：ε=${privacy.epsilon}，l=${privacy.l}；加噪分级计数 ${noisy}；l-多样性${diversity}`,
     });
-    window.open(api.privacyExportUrl(current.value.id, epsilon.value, diversityL.value), "_blank");
+    await downloadWithAuth(
+      api.privacyExportUrl(current.value.id, epsilon.value, diversityL.value),
+      `flowmask-${current.value.id}-privacy.jsonl`,
+    );
   } catch (err) {
     ElMessage.error(`隐私导出失败：${err.message || err}`);
   }

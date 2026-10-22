@@ -46,6 +46,50 @@ function formBody(file) {
   return { method: "POST", body: fd };
 }
 
+// 文件名：优先 Content-Disposition 的 filename*=UTF-8''（支持中文名），退化到 filename="..."。
+export function fileNameFromDisposition(header) {
+  if (!header) return "";
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(header);
+  if (utf8) {
+    try {
+      return decodeURIComponent(utf8[1].trim());
+    } catch {
+      /* 编码异常就退回 filename= */
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(header);
+  return plain ? plain[1].trim() : "";
+}
+
+// 导出/下载统一入口：fetch 带 Authorization 拿 Blob，再用 <a download> 落盘。
+// 不用 window.open 或裸 <a href>：配了 FLOWMASK_API_TOKEN 时它们带不上 Authorization，
+// 且 window.open 在部分浏览器会被弹窗拦截。
+export async function downloadWithAuth(url, fallbackName) {
+  const res = await fetch(url, { headers: authHeaders() });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      if (body && body.detail) detail = body.detail;
+    } catch {
+      /* 非 JSON 错误体，保留 statusText */
+    }
+    throw new Error(`${res.status} ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+  }
+  const blob = await res.blob();
+  const name = fileNameFromDisposition(res.headers.get("Content-Disposition")) || fallbackName;
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // click 后立刻 revoke 在部分浏览器会取不到内容，放到下一轮事件循环再清理
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+  return name;
+}
+
 export const api = {
   health: () => request("/health"),
   formats: () => request("/formats"),
