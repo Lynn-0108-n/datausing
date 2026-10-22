@@ -1,4 +1,4 @@
-﻿# FlowMask · 分级脱敏与审计溯源系统
+# FlowMask · 分级脱敏与审计溯源系统
 
 > 福建省大学生数据安全大赛 · 自主命题（数据脱敏方向）参赛作品
 > **v2 主链路**：文档/文件/文本输入 → 多模型分级识别 → 四级脱敏 → 落库留痕 → 哈希链审计（Python FastAPI 一体机，见 [`server/README.md`](server/README.md)）
@@ -76,6 +76,7 @@ go run ./cmd/genpcaps && go run ./cmd/flowmask -db data/flowmask.db
 | 离线检测 CLI | `cmd/flowmask`：pcap → findings 表格/JSON + 分级统计 | ✅ |
 | TCP 重组 + HTTP 解析 | 跨包 body 还原、Content-Type 分派、gzip/分块 | 🚧 |
 | findings 落库 + API | `dlp_findings` 表（SQLite/JSONL）、`/api/v1/dlp/findings`、`/stats`、`/export` | ✅ |
+| 在线 DLP 接入 | 采集端 0.25.0：`[dlp]` 启用后采集链路把载荷投给 L1 worker 池，命中 ≥ `min_level` 才落库（只存脱敏副本）；队列满丢帧计数见 `/api/v1/traffic/now` | ✅ |
 | L2 语义识别 | bert-base-chinese 多标签（ONNX int8，CPU 5-20ms） | ⏳ |
 | L3 大模型复核 | 本地指令裁判 Qwen2.5-1.5B-Instruct / 护栏 Qwen3Guard-Gen-0.6B（`server/l3_service/`），只复核 L1 灰区、只升不降且默认封顶 L2，带超时降级 | ✅ |
 | 可视化看板 | 饼图/柱状/时间线 + 脱敏前后高亮对照 | ⏳ |
@@ -151,6 +152,12 @@ go run ./cmd/netmon -source replay -replay-file data/demo-dlp.pcap -offline
 
 > 让网页/接口看到 DLP 结果：把采集端配置里的 `storage.sqlite_path` 指向 `data/flowmask.db`
 > （`[storage] storage = "sqlite"`），启动后即可查询下面的接口。
+
+> **在线检测（采集端 0.25.0 起）**：把 `netmon.example.toml` 的 `[dlp] enabled` 改为 `true` 后启动
+> `netmon`（实时或回放数据源均可），采集链路就会把每个报文的载荷快照旁路投递给 L1 worker 池，
+> 命中且达到 `min_level` 时写 `dlp_findings`（**只存脱敏副本，原文不入库**）。
+> `/api/v1/traffic/now` 会多出 `dlp_online` / `dlp_frames` / `dlp_hits` / `dlp_dropped` 四个字段，
+> 其中 `dlp_dropped` 是队列满被丢弃的帧数——不为 0 时调大 `[dlp] queue_size` 或 `workers`。
 
 | 在线接口 | 说明 |
 | --- | --- |
