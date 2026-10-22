@@ -218,13 +218,16 @@ def detect(text: str, rules: tuple[Rule, ...] | None = None) -> list[Hit]:
         return []
     hits: list[Hit] = []
     for rule in rules if rules is not None else active_rules():
+        # 捕获组号越界（例如自定义规则没写捕获组却沿用默认 group=1）时退化为整段匹配，
+        # 不能让一条规则把整条检测链路抛成 500。
+        group = rule.group if rule.group <= rule.pattern.groups else 0
         for match in rule.pattern.finditer(text):
-            value = match.group(rule.group)
+            value = match.group(group)
             if not value:
                 continue
             if rule.validate is not None and not rule.validate(value):
                 continue
-            start, end = match.span(rule.group)
+            start, end = match.span(group)
             hits.append(
                 Hit(
                     type=rule.type,

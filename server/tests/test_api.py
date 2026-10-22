@@ -200,7 +200,7 @@ def test_rule_validation_errors(client) -> None:
     assert bad_regex.status_code == 422
     duplicate = client.post(
         "/api/v1/rules",
-        json={"id": "mobile", "name": "x", "type": "secret", "pattern": "abc", "weight": 0.5},
+        json={"id": "mobile", "name": "x", "type": "secret", "pattern": r"(\d{6})", "weight": 0.5},
     )
     assert duplicate.status_code == 409
 

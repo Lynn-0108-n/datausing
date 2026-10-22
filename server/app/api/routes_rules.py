@@ -43,15 +43,21 @@ def sync_active_rules(db: Database) -> None:
             continue
         try:
             pattern = re.compile(row["pattern"])
-        except re.error:
+            entity_type = EntityType(row["type"])
+            weight = float(row["weight"])
+            confidence = float(row["confidence"])
+        except (re.error, ValueError, TypeError):
             continue  # 坏规则跳过：不能让一条脏数据拖垮整条检测链路
+        # 自定义规则允许没有捕获组（历史数据/直接写库）：退化为整段匹配，
+        # 避免 match.group(1) 抛 IndexError 把 detect() 打成 500。
         active.append(
             Rule(
                 name=rule_id,
-                type=EntityType(row["type"]),
+                type=entity_type,
                 pattern=pattern,
-                weight=float(row["weight"]),
-                confidence=float(row["confidence"]),
+                weight=weight,
+                confidence=confidence,
+                group=1 if pattern.groups else 0,
             )
         )
     set_active_rules(tuple(active))

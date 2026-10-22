@@ -199,9 +199,13 @@ class RuleIn(BaseModel):
     @classmethod
     def _valid_pattern(cls, value: str) -> str:
         try:
-            re.compile(value)
+            compiled = re.compile(value)
         except re.error as exc:
             raise ValueError(f"正则表达式非法: {exc}") from exc
+        # 捕获组用于定位「要脱敏的片段」；没有捕获组时 match.group(1) 会抛
+        # IndexError，把整条检测链路打成 500，所以创建入口就要拦住。
+        if compiled.groups < 1:
+            raise ValueError("正则至少要有一个捕获组，用 (...) 包住要脱敏的内容")
         return value
 
 
