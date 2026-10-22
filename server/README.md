@@ -59,7 +59,7 @@ scripts\stop_local.cmd                            # 停止全部
 ### 2.2 手动启动（分步调试用）
 
 ```powershell
-python -m pytest -o addopts="" -q    # 522 个用例（517 通过 + 5 跳过；4 个性能预算用例需 FLOWMASK_RUN_PERF=1）
+python -m pytest -o addopts="" -q    # 523 个用例（518 通过 + 5 跳过；4 个性能预算用例需 FLOWMASK_RUN_PERF=1）
 python -m bench --markdown-out ../docs/性能报告.md   # 性能基准（L1/端到端/L2；加 --l3-endpoint 测 L3）
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
 # 构建正式前端（可选，需 Node 18+；产物在 ../web/dist）
@@ -508,7 +508,7 @@ l3_training/         L3 指令微调：金标→指令样本、LoRA 训练、权
   l3_service/          L3 推理服务（mock / hf / instruct 后端 + /v1/judge”）
   samples/             自带示例抓包生成脚本与 demo-traffic.pcap
   eval/                评测集（351 条主集 + 200 条 NER 压力集）与评测说明
-  tests/               522 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、长文本性能、前端与脚本静态回归
+  tests/               523 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、长文本性能、前端与脚本静态回归
   pyproject.toml
   requirements.txt     运行依赖（固定版本）
   requirements-ml.txt  可选：L2/L3/NER/训练与导出
@@ -653,6 +653,10 @@ powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
 
 模型权重**不打进 exe**（这是体积能压到 50 MB 的原因）：把 `l2_models/`、`models/` 放到 **exe 同级目录**即可被自动识别；
 没有权重也能启动，链路自动降级为 L1-only（`degraded=true`）。
+
+打包会一并带上 **L1 三级敏感词表**（`app/identify/knowledge/*.yaml`，法规/行业/企业共 66 词）；
+构建后跑 `FlowMask.exe --self-check` 或看 `/api/v1/health` 的 `keywords` 字段（应为 66）即可确认词表已进包
+——漏打包不会报错，只会静默变成空词表，所以 `server/tests/test_desktop.py` 有静态回归盯着两份 spec。
 
 在桌面放双击入口（「启动」和「停止」两个快捷方式）：
 
