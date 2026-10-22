@@ -254,3 +254,40 @@ func TestCaptureCPUPinParsing(t *testing.T) {
 		t.Error("默认应关闭 CPU 绑定（保持原有调度行为）")
 	}
 }
+
+// TestDLPConfigParsing 校验 [dlp] 段的解析、默认值与越界回退。
+func TestDLPConfigParsing(t *testing.T) {
+	p := writeTemp(t, "[dlp]\nenabled = true\nmode = \"offline\"\nqueue_size = 128\nworkers = 8\nmax_payload = 4096\nmin_level = \"l2\"\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.DLP.Enabled || cfg.DLP.Mode != "offline" {
+		t.Fatalf("enabled=%v mode=%q, want true/offline", cfg.DLP.Enabled, cfg.DLP.Mode)
+	}
+	if cfg.DLP.QueueSize != 128 || cfg.DLP.Workers != 8 || cfg.DLP.MaxPayload != 4096 {
+		t.Fatalf("queue=%d workers=%d max_payload=%d, want 128/8/4096",
+			cfg.DLP.QueueSize, cfg.DLP.Workers, cfg.DLP.MaxPayload)
+	}
+	if cfg.DLP.MinLevel != "L2" {
+		t.Fatalf("min_level=%q, want 大小写归一为 L2", cfg.DLP.MinLevel)
+	}
+
+	d := Default()
+	if d.DLP.Enabled {
+		t.Error("默认应关闭在线 DLP（不抓内容的部署不付识别成本）")
+	}
+	if d.DLP.QueueSize != 4096 || d.DLP.Workers != 4 || d.DLP.MaxPayload != 65536 || d.DLP.MinLevel != "SAFE" {
+		t.Errorf("默认 DLP 配置异常: %+v", d.DLP)
+	}
+
+	// 越界/非法值应保持默认，而不是写进一个跑起来就出问题的配置。
+	bad := writeTemp(t, "[dlp]\nmode = \"bogus\"\nqueue_size = 0\nworkers = 999\nmax_payload = -1\n")
+	cfgBad, err := Load(bad)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfgBad.DLP.Mode != "live" || cfgBad.DLP.QueueSize != 4096 || cfgBad.DLP.Workers != 4 || cfgBad.DLP.MaxPayload != 65536 {
+		t.Errorf("非法值应回退默认: %+v", cfgBad.DLP)
+	}
+}

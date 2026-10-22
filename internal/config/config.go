@@ -41,6 +41,19 @@ type PluginConfig struct {
 	Dir string // 界面插件清单目录（*.json 声明式清单）；为空表示不启用
 }
 
+// DLPConfig 汇总在线 DLP 接入配置（默认关闭，显式开启后采集链路才做内容级检测）。
+//
+// 为什么放在配置里而不是写死：在线检测会按 workers 数量起常驻 goroutine，
+// 并对每个含载荷的报文做一次规则匹配；不需要 DLP 的纯流量监控场景应能完全不付这份成本。
+type DLPConfig struct {
+	Enabled    bool   // 是否在采集链路里做在线 L1 检测
+	Mode       string // live | offline：仅用于日志展示，实际模式由 core.source 决定
+	QueueSize  int    // 待分析载荷队列长度，满则丢帧并计入 dlp_dropped
+	Workers    int    // 识别 worker 数（默认 4）
+	MaxPayload int    // 单条载荷最多分析的字节数，超长截断（默认 64KB）
+	MinLevel   string // 低于该级别的命中不落库：SAFE/L1/L2/L3（默认 SAFE）
+}
+
 // Config 汇总各模块需要的运行参数。
 type Config struct {
 	MachineID  string        // 机器标识，未来多机对比时的标签
@@ -62,6 +75,7 @@ type Config struct {
 	Alert      AlertConfig   // 可选告警规则
 	Update     UpdateConfig  // 可选自升级配置
 	Plugins    PluginConfig  // 可选界面插件目录
+	DLP        DLPConfig     // 可选在线 DLP 检测
 }
 
 // Default 返回开箱即用的默认配置（synthetic 数据源，便于无网卡环境演示）。
@@ -89,6 +103,14 @@ func Default() *Config {
 			Enabled: false,
 			MaxMB:   64,
 			Service: "netmon",
+		},
+		DLP: DLPConfig{
+			Enabled:    false,
+			Mode:       "live",
+			QueueSize:  4096,
+			Workers:    4,
+			MaxPayload: 65536,
+			MinLevel:   "SAFE",
 		},
 	}
 }
@@ -284,6 +306,38 @@ func (c *Config) apply(v map[string]string) {
 	}
 	if s, ok := v["plugins.dir"]; ok {
 		c.Plugins.Dir = s
+	}
+	if s, ok := v["dlp.enabled"]; ok {
+		if b, err := strconv.ParseBool(s); err == nil {
+			c.DLP.Enabled = b
+		}
+	}
+	if s, ok := v["dlp.mode"]; ok {
+		if s == "live" || s == "offline" {
+			c.DLP.Mode = s
+		}
+	}
+	if n, ok := v["dlp.queue_size"]; ok {
+		if i, err := strconv.Atoi(n); err == nil && i > 0 && i <= 65536 {
+			c.DLP.QueueSize = i
+		}
+	}
+	if n, ok := v["dlp.workers"]; ok {
+		if i, err := strconv.Atoi(n); err == nil && i > 0 && i <= 64 {
+			c.DLP.Workers = i
+		}
+	}
+	if n, ok := v["dlp.max_payload"]; ok {
+		if i, err := strconv.Atoi(n); err == nil && i > 0 {
+			c.DLP.MaxPayload = i
+		}
+	}
+	if s, ok := v["dlp.min_level"]; ok {
+		if _, err := strconv.Atoi(s); err != nil {
+			// 级别名（SAFE/L1/L2/L3）在这里只做大写归一，合法性由 app 层用 dlp.ParseLevel 校验：
+			// config 包不依赖识别层，避免为一处校验引入包依赖。
+			c.DLP.MinLevel = strings.ToUpper(strings.TrimSpace(s))
+		}
 	}
 	if n, ok := v["alert.auto_capture_seconds"]; ok {
 		if i, err := strconv.Atoi(n); err == nil && i > 0 {

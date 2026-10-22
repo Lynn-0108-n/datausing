@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/wukiQAQ/datausing/internal/aggregator"
@@ -28,6 +29,8 @@ type App struct {
 	Store  storage.Backend
 	Alerts *alert.Engine   // 可选告警引擎，nil 表示不启用
 	Dumper *capture.Dumper // 可选按需抓包器，nil 表示不导出 pcap
+	// dlp 可选在线检测管道，nil 表示不检测（见 EnableDLP）。
+	dlp *dlpPipeline
 	// Offline 为真时走离线回放路径：用报文时间戳（而非墙钟）驱动聚合与过期，
 	// 且数据源耗尽后不退出进程，直到 ctx 取消。默认由 cfg.Offline 初始化。
 	Offline bool
@@ -59,7 +62,72 @@ func (a *App) HandlePacket(p *capture.Packet) bool {
 	}
 	a.Table.Handle(info.Protocol, info.SrcIP, info.DstIP, info.SrcPort, info.DstPort, info.TCPFlags, len(p.Raw), p.Ts)
 	a.Agg.Observe(len(p.Raw))
+	// 在线检测是旁路：只把载荷快照投进有界队列，队列满就丢帧计数，
+	// 绝不阻塞采集主循环（否则 DLP 慢会直接把抓包拖出丢包）。
+	if a.dlp != nil {
+		a.submitDLP(p, info)
+	}
 	return true
+}
+
+// EnableDLP 启用在线 L1 检测。store 必须实现 storage.FindingStore；
+// 仅在启动阶段调用一次（worker 常驻，运行期开关会引入并发边界问题）。
+func (a *App) EnableDLP(store storage.Backend) error {
+	findings, ok := store.(storage.FindingStore)
+	if !ok {
+		return errors.New("当前存储后端不支持 findings（需要 sqlite 或 file 后端）")
+	}
+	p, err := newDLPPipeline(findings, a.Cfg.DLP)
+	if err != nil {
+		return err
+	}
+	a.dlp = p
+	return nil
+}
+
+// CloseDLP 停止接收新载荷并等待在途分析写完。
+// 只能在采集循环完全停止后调用：关闭队列后 HandlePacket 再投递会 panic。
+func (a *App) CloseDLP() {
+	if a.dlp == nil {
+		return
+	}
+	a.dlp.close()
+	a.dlp = nil
+}
+
+// DLPSnapshot 返回在线检测的三个累计计数：已分析帧数、落库命中数、队列满丢弃帧数。
+// 未启用时全为 0，便于 API 层无条件下发。
+func (a *App) DLPSnapshot() (frames, hits, dropped uint64) {
+	if a.dlp == nil {
+		return 0, 0, 0
+	}
+	return a.dlp.frames.Load(), a.dlp.hits.Load(), a.dlp.dropped.Load()
+}
+
+// submitDLP 把报文载荷复制成任务投递给 worker 池。
+// payload 必须复制：capture.Source 可能复用读缓冲，异步分析时原切片可能已被覆盖。
+func (a *App) submitDLP(p *capture.Packet, info *parser.Info) {
+	payload, ok := parser.Payload(p.Raw)
+	if !ok || len(payload) == 0 {
+		return
+	}
+	limit := a.Cfg.DLP.MaxPayload
+	truncated := limit > 0 && len(payload) > limit
+	if truncated {
+		payload = payload[:limit]
+	}
+	job := dlpJob{
+		ts:               p.Ts,
+		srcIP:            info.SrcIP.String(),
+		dstIP:            info.DstIP.String(),
+		srcPort:          info.SrcPort,
+		dstPort:          info.DstPort,
+		proto:            strings.ToLower(protoName(info.Protocol)),
+		payload:          append([]byte(nil), payload...),
+		payloadBytes:     len(payload),
+		payloadTruncated: truncated,
+	}
+	a.dlp.submit(job)
 }
 
 // TickOnce 执行一个聚合周期：输出采样、过期会话落盘、指标持久化、按策略清理。
