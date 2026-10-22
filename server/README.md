@@ -59,7 +59,7 @@ scripts\stop_local.cmd                            # 停止全部
 ### 2.2 手动启动（分步调试用）
 
 ```powershell
-python -m pytest -o addopts="" -q    # 442 个用例（441 通过 + 1 跳过）
+python -m pytest -o addopts="" -q    # 505 个用例（500 通过 + 5 跳过；4 个性能预算用例需 FLOWMASK_RUN_PERF=1）
 python -m bench --markdown-out ../docs/性能报告.md   # 性能基准（L1/端到端/L2；加 --l3-endpoint 测 L3）
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
 # 构建正式前端（可选，需 Node 18+；产物在 ../web/dist）
@@ -444,7 +444,8 @@ dumpcap -i 1 -w data/live.pcapng -b filesize:10240   # pcapng 同样是支持的
 | `FLOWMASK_DATA_DIR` | `server/data` | 数据目录 |
 | `FLOWMASK_DB_PATH` | `<data_dir>/flowmask.db` | SQLite 路径 |
 | `FLOWMASK_API_TOKEN` | 空 | 非空则开启 Bearer 鉴权 |
-| `FLOWMASK_AUDIT_SECRET` | `flowmask-demo-secret` | 审计链 HMAC 密钥（演示值，生产必须换） |
+| `FLOWMASK_AUDIT_SECRET` | 空（自动生成） | 审计链 HMAC 密钥；留空则首次启动生成 64 位随机 hex 写入 `<data_dir>/audit_secret.key`，迁移数据目录需一并带走；旧库历史链可显式填 `flowmask-demo-secret` |
+| `FLOWMASK_REVEAL_OPERATORS` | 空 | 动态脱敏「查看原文」的服务端白名单（逗号分隔操作人 ID）；留空表示一律只返回脱敏副本 |
 | `FLOWMASK_ENABLE_L2` | `false` | 是否升级 L2 语义识别 |
 | `FLOWMASK_L2_ENDPOINT` | `http://127.0.0.1:8091/v1/classify` | BERT 推理服务地址 |
 | `FLOWMASK_ENABLE_L3` | `false` | 是否启用 L3 大模型复核 |
@@ -507,7 +508,7 @@ l3_training/         L3 指令微调：金标→指令样本、LoRA 训练、权
   l3_service/          L3 推理服务（mock / hf / instruct 后端 + /v1/judge”）
   samples/             自带示例抓包生成脚本与 demo-traffic.pcap
   eval/                评测集（351 条主集 + 200 条 NER 压力集）与评测说明
-  tests/               442 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、前端与脚本静态回归
+  tests/               505 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、长文本性能、前端与脚本静态回归
   pyproject.toml
   requirements.txt     运行依赖（固定版本）
   requirements-ml.txt  可选：L2/L3/NER/训练与导出
