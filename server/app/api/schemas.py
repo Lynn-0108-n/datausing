@@ -120,6 +120,50 @@ class StatsOut(BaseModel):
     task_id: str | None = None
 
 
+class AlertOut(BaseModel):
+    """一条分级告警（检测结果 → 告警 → 处置）。"""
+
+    id: int
+    task_id: str
+    finding_id: int = Field(description="对应的检测结果 id")
+    level: str = Field(description="检测级别：L3 / L2 / L1")
+    level_label: str = Field(description="级别中文名：高危 / 中危 / 低危")
+    severity: str = Field(description="告警等级：紧急 / 重要 / 提示")
+    types: list[str] = Field(description="英文类别键")
+    score: float
+    path: str = Field(description="触发告警的片段位置")
+    title: str
+    suggestion: str = Field(description="脱敏/处置建议（与四级脱敏模板同一口径）")
+    status: str = Field(description="open / ack / ignored")
+    status_label: str = Field(description="待处理 / 已认领 / 已忽略")
+    created_at: str
+    handled_at: str | None = None
+    handled_by: str | None = Field(default=None, description="认领/忽略的操作人")
+    note: str = ""
+
+
+class AlertPage(BaseModel):
+    items: list[AlertOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class AlertSummaryOut(BaseModel):
+    total: int
+    open: int = Field(description="待处理告警数（角标/看板用）")
+    by_level: dict[str, int] = Field(description="按级别分布")
+    by_status: dict[str, int] = Field(description="按状态分布")
+    task_id: str | None = None
+
+
+class AlertAckIn(BaseModel):
+    """处理告警：认领（ack）、忽略（ignored）或重置（open）。"""
+
+    status: str = Field(default="ack", description="ack / ignored / open")
+    note: str = Field(default="", max_length=200, description="处理备注")
+
+
 class RuleOut(BaseModel):
     id: str
     name: str

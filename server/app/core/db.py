@@ -82,6 +82,25 @@ CREATE TABLE IF NOT EXISTS user_prefs (
   updated_at  TEXT NOT NULL,
   PRIMARY KEY (operator_id, key)
 );
+
+CREATE TABLE IF NOT EXISTS alerts (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id     TEXT NOT NULL,
+  finding_id  INTEGER NOT NULL,           -- 对应 findings.id，便于从告警回看检测结果
+  level       TEXT NOT NULL,              -- L3 / L2 / L1（SAFE 不告警）
+  types       TEXT NOT NULL,              -- 逗号分隔的英文类别键
+  score       REAL NOT NULL,
+  path        TEXT NOT NULL,              -- 片段位置：定位到"哪一段"触发了告警
+  title       TEXT NOT NULL,              -- 告警标题（级别 + 类别 + 位置）
+  suggestion  TEXT NOT NULL,              -- 脱敏/处置建议（与四级脱敏模板同一口径）
+  status      TEXT NOT NULL DEFAULT 'open', -- open / ack / ignored
+  created_at  TEXT NOT NULL,
+  handled_at  TEXT,
+  handled_by  TEXT,
+  note        TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_task   ON alerts(task_id, id);
+CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status, level);
 """
 
 

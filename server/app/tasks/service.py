@@ -14,6 +14,7 @@ import threading
 import uuid
 from typing import Any
 
+from ..alerts import insert_alerts
 from ..audit import append_entry
 from ..core.db import Database, utcnow_iso
 from ..identify import DetectionPipeline, DetectOptions, Level
@@ -111,8 +112,9 @@ def _execute(
         report = pipeline.analyze_document(document, options)
 
         with db.write() as conn:
+            inserted: list[tuple[int, Any]] = []
             for finding in report.findings:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     INSERT INTO findings
                       (task_id, path, level, score, types, hits, masked, original_hash,
@@ -135,6 +137,10 @@ def _execute(
                         utcnow_iso(),
                     ),
                 )
+                inserted.append((int(cursor.lastrowid or 0), finding))
+            # 告警与 findings 同事务落库：保证「有检测结果就有对应告警」，
+            # 失败时整体回滚，不出现"任务完成但队列里没告警"的半状态。
+            insert_alerts(conn, task_id=task_id, findings=inserted)
             conn.execute(
                 "UPDATE tasks SET status=?, finished_at=?, total_segments=?, total_findings=? WHERE id=?",
                 (

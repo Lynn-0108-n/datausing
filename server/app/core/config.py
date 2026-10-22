@@ -54,6 +54,15 @@ def _parse_theme(value: str) -> str:
     return normalized if normalized in THEMES else "system"
 
 
+LEVEL_VALUES = ("SAFE", "L1", "L2", "L3")
+
+
+def _parse_level(value: str) -> str:
+    """告警阈值只接受四级；配错退回 L1（不因一个笔误把告警全关掉或起不来）。"""
+    normalized = (value or "").strip().upper()
+    return normalized if normalized in LEVEL_VALUES else "L1"
+
+
 @dataclass(frozen=True)
 class Settings:
     """一份不可变的运行配置快照。"""
@@ -82,6 +91,9 @@ class Settings:
     # 前端默认主题：light / dark / system（system 表示跟随操作系统外观）。
     # 用户在界面里手动选过之后，个人偏好存在库里并优先于这个默认值。
     default_theme: str
+    # 告警触发阈值：检测结果级别 ≥ 该值才生成告警（L3/L2/L1/SAFE）。
+    # 默认 L1：所有敏感命中都进告警队列；演示"只看高危"可设 FLOWMASK_ALERT_MIN_LEVEL=L3。
+    alert_min_level: str
 
     @classmethod
     def load(cls) -> "Settings":
@@ -110,6 +122,7 @@ class Settings:
             ner_model_dir=_env_str("NER_MODEL_DIR", ""),
             ner_device=_env_str("NER_DEVICE", "cpu").strip().lower(),
             default_theme=_parse_theme(_env_str("DEFAULT_THEME", "system")),
+            alert_min_level=_parse_level(_env_str("ALERT_MIN_LEVEL", "L1")),
         )
 
 

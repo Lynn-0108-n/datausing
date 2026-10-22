@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .api.deps import require_token
+from .api.routes_alerts import router as alerts_router
 from .api.routes_audit import router as audit_router
 from .api.routes_detect import router as detect_router
 from .api.routes_findings import router as findings_router
@@ -87,6 +88,7 @@ def create_app() -> FastAPI:
             {"name": "tasks", "description": "后台任务：上传/粘贴 → 识别 → 落库 → 审计"},
             {"name": "traffic", "description": "流量接入：pcap 导入 / 外部推送 / 实时旁路跟随 → 同一套识别分级与审计"},
             {"name": "findings", "description": "检测结果查询"},
+            {"name": "alerts", "description": "分级告警与脱敏建议（检测 → 告警 → 处置）"},
             {"name": "stats", "description": "看板统计"},
             {"name": "rules", "description": "内置/自定义敏感规则"},
             {"name": "audit", "description": "审计溯源与哈希链校验"},
@@ -109,6 +111,7 @@ def create_app() -> FastAPI:
         tasks_router,
         traffic_router,
         findings_router,
+        alerts_router,
         stats_router,
         rules_router,
         audit_router,
