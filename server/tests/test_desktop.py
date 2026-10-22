@@ -124,6 +124,21 @@ def test_spec_and_entrypoint_are_consistent() -> None:
         assert excluded in spec, excluded
 
 
+def test_spec_bundles_l1_keyword_knowledge_assets() -> None:
+    """L1 三级词表是运行时读取的 YAML：漏打包不会报错，只会静默退化成空词表。"""
+    server_dir = Path(__file__).resolve().parents[1]
+    knowledge = server_dir / "app" / "identify" / "knowledge"
+    assert len(list(knowledge.glob("*.yaml"))) >= 3
+    spec = (server_dir / "flowmask.spec").read_text(encoding="utf-8")
+    assert '("app/identify/knowledge", "app/identify/knowledge")' in spec
+    # 调试版 spec 在 .gitignore 里（仅本机调试用）；存在时也要求同步，避免两份配置漂移
+    debug_spec = server_dir / "flowmask_debug.spec"
+    if debug_spec.exists():
+        assert '("app/identify/knowledge", "app/identify/knowledge")' in debug_spec.read_text(
+            encoding="utf-8"
+        )
+
+
 def test_build_script_exists_and_mentions_pyinstaller() -> None:
     script = Path(__file__).resolve().parents[1] / "scripts" / "build_exe.ps1"
     text = script.read_text(encoding="utf-8-sig")

@@ -7,6 +7,8 @@
 产物：``server/dist_exe/FlowMask.exe``（双击启动，自动开一个应用窗口）。
 说明：
 - 打包进去的只有「主服务」：L1 规则 + 解析 + 任务/审计/API + 前端静态资源 + 示例抓包；
+- L1 三级敏感词表 ``app/identify/knowledge/*.yaml`` 是运行时读取的数据文件，必须显式列进
+  ``datas``：漏了不会报错，``load_knowledge()`` 只会静默返回空词表（打包版悄悄丢掉词表层）；
 - L2/L3/NER 的模型权重体积大（GB 级），**不打进 exe**，放 exe 同级的 ``l2_models/``、``models/`` 即可被识别；
 - torch/onnxruntime/transformers 不打包（exe 只跑主服务，模型服务用 python 单独起，见 README 第 3/4 章）。
 """
@@ -17,6 +19,8 @@ from PyInstaller.utils.hooks import collect_submodules
 datas = [
     ("../web/dist", "web/dist"),
     ("app/webui", "app/webui"),
+    # L1 敏感词表（keywords.py 用 Path(__file__).parent/"knowledge" 读取）
+    ("app/identify/knowledge", "app/identify/knowledge"),
     ("samples", "samples"),
     ("eval", "eval"),
 ]
