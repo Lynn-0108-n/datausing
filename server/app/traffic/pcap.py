@@ -13,6 +13,8 @@ from typing import Iterator
 PCAP_MAGIC_USEC = 0xA1B2C3D4
 PCAP_MAGIC_NSEC = 0xA1B23C4D
 PCAPNG_MAGIC = 0x0A0D0D0A
+# 单个 pcapng 块的上限：防止脏文件声明超大块把内存/循环拖死
+MAX_PCAPNG_BLOCK = 16 << 20
 
 
 class PcapError(ValueError):
@@ -83,6 +85,10 @@ def _iter_pcapng(data: bytes) -> Iterator[RawPacket]:
             bom_raw = data[offset + 8 : offset + 12]
             endian = "<" if int.from_bytes(bom_raw, "little") == 0x1A2B3C4D else ">"
             block_len = struct.unpack(endian + "I", data[offset + 4 : offset + 8])[0]
+            # SHB 至少 28 字节；block_len 为 0 时 offset 原地打转会让解析器死循环，
+            # 超过文件实际长度则说明文件被截断——都必须报错，不能静默跳过。
+            if block_len < 28 or block_len > MAX_PCAPNG_BLOCK or offset + block_len > len(data):
+                raise PcapError("pcapng Section Header Block 长度非法（文件可能不完整）")
             offset += block_len
             interfaces = []
             continue
