@@ -5,4 +5,5 @@ setlocal
 set "BASE=%~1"
 if "%BASE%"=="" set "BASE=http://127.0.0.1:8090"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0demo.ps1" -BaseUrl "%BASE%" %2 %3
-endlocal
+set "RC=%ERRORLEVEL%"
+endlocal & exit /b %RC%

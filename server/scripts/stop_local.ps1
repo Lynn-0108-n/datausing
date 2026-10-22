@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     停止由 scripts/start_local.ps1 启动的所有 FlowMask 进程。
 

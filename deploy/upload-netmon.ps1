@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   从 Windows 一键上传并更新 Linux 上的 netmon 采集端。
 .EXAMPLE

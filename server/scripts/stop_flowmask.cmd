@@ -23,5 +23,6 @@ exit /b 0
 :fallback
 echo FlowMask.exe not found, falling back to stop_local.ps1 ...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%HERE%stop_local.ps1"
+set "RC=%ERRORLEVEL%"
 ping -n 4 127.0.0.1 >nul
-exit /b 0
+exit /b %RC%

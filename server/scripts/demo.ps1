@@ -171,11 +171,27 @@ if ($batch) {
 }
 
 # ---------------------------------------------------------------- 5. 动态脱敏
-Write-Step "5/8 动态脱敏（未授权=脱敏副本；授权=原文并留审计）"
+Write-Step "5/8 动态脱敏（未授权=脱敏副本；原文仅限服务端白名单）"
 $maskedView = Invoke-Api -Method POST -Path "/dynamic/render" -Body @{ text = $sampleText; authorized = $false }
 $rawView = Invoke-Api -Method POST -Path "/dynamic/render" -Body @{ text = $sampleText; authorized = $true; mask_level = "L3" }
-if ($maskedView) { Write-Ok "未授权视图：policy=$($maskedView.policy)，分级 $($maskedView.level)，脱敏副本长度 $($maskedView.text.Length)" }
-if ($rawView) { Write-Ok "授权视图：policy=$($rawView.policy)，操作人 $($rawView.operator_id)，返回原文长度 $($rawView.text.Length)（已写审计链）" }
+if ($maskedView) {
+    if ($maskedView.text -match "11010519491231002X|13800138000") {
+        Write-Bad "未授权视图里仍出现原始敏感值！"
+    } else {
+        Write-Ok "未授权视图：policy=$($maskedView.policy)，分级 $($maskedView.level)，脱敏副本长度 $($maskedView.text.Length)，不含原文"
+    }
+}
+if ($rawView) {
+    if ($rawView.policy -eq "full_access") {
+        if ($rawView.text -match "11010519491231002X") {
+            Write-Ok "服务端授权视图：policy=full_access，操作人 $($rawView.operator_id)，返回原文（已写审计链）"
+        } else {
+            Write-Bad "policy=full_access 但返回内容不含原文"
+        }
+    } else {
+        Write-Ok "客户端自报 authorized=true 未获服务端授权：policy=$($rawView.policy)，仍返回脱敏副本（需把操作人加入 FLOWMASK_REVEAL_OPERATORS 白名单）"
+    }
+}
 
 # ---------------------------------------------------------------- 6. 隐私导出
 Write-Step "6/8 隐私增强导出（Laplace + l-多样性）"

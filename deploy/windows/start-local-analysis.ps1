@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   在 Windows 上单机启动 netmon 引擎：分析本地 pcap 文件，或直接实时抓本机网卡，并打开浏览器仪表盘。
 .DESCRIPTION

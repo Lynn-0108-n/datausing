@@ -150,3 +150,66 @@ def test_batch_view_discards_stale_poll_and_submit_responses():
     assert "seq !== openTaskSeq" in view
     # 汇总被丢弃的已完成任务要能在下一轮补统计，不能永远停在 0
     assert "statsLoaded" in view
+
+
+def test_powershell_scripts_with_non_ascii_have_utf8_bom():
+    """含中文的 .ps1 必须带 UTF-8 BOM。
+
+    一键入口 start_local.cmd 用 Windows PowerShell 5.1 执行 .ps1；
+    PS5.1 对无 BOM 的 UTF-8 文件按 ANSI 解码，中文会打乱引号导致整份脚本
+    解析失败（换机演练实测）。此用例防止编辑脚本时再次弄丢 BOM。
+    """
+    scripts = sorted(SERVER_DIR.glob("scripts/*.ps1")) + sorted(
+        REPO_DIR.glob("deploy/**/*.ps1")
+    )
+    assert scripts, "未找到任何 PowerShell 脚本"
+    with_non_ascii = []
+    for path in scripts:
+        data = path.read_bytes()
+        if all(byte < 0x80 for byte in data):
+            continue
+        assert data.startswith(b"\xef\xbb\xbf"), (
+            f"{path.relative_to(REPO_DIR)} 含非 ASCII 字符但缺少 UTF-8 BOM，"
+            "Windows PowerShell 5.1 会解析失败（需保存为 UTF-8 with BOM）"
+        )
+        with_non_ascii.append(path.name)
+    assert with_non_ascii, "未找到含非 ASCII 字符的 PowerShell 脚本"
+
+
+def test_cmd_wrappers_are_ascii_only():
+    """一键 .cmd 包装必须是纯 ASCII。
+
+    cmd.exe 用 OEM 代码页（中文系统为 CP936）读取批处理文件；UTF-8 中文注释
+    会被解码成乱码甚至被当成命令执行（换机演练实测 start_local.cmd 打印
+    "'庯細Windows' 不是内部或外部命令"）。包装层只保留英文注释。
+    """
+    wrappers = sorted(SERVER_DIR.glob("scripts/*.cmd")) + sorted(
+        REPO_DIR.glob("deploy/**/*.cmd")
+    )
+    assert wrappers, "未找到任何 .cmd 包装脚本"
+    for path in wrappers:
+        data = path.read_bytes()
+        offending = [byte for byte in data if byte >= 0x80]
+        assert not offending, (
+            f"{path.relative_to(REPO_DIR)} 含非 ASCII 字节，cmd.exe 会按 OEM 代码页"
+            " 误解码；请把注释改成英文（保持纯 ASCII）"
+        )
+
+
+def test_cmd_wrappers_propagate_child_exit_code():
+    """包装脚本要把 powershell 子进程的退出码透出给调用方。
+
+    否则 start/demo 失败时 .cmd 仍返回 0，换机演练和自动化脚本会误判成功。
+    """
+    for name in ("start_local.cmd", "stop_local.cmd", "demo.cmd"):
+        text = _read(SERVER_DIR / "scripts" / name)
+        assert "set \"RC=%ERRORLEVEL%\"" in text, f"{name} 未保存子进程退出码"
+        assert "endlocal & exit /b %RC%" in text, f"{name} 未把退出码透出"
+
+
+def test_demo_script_reflects_server_side_dynamic_auth():
+    """演示脚本要按服务端授权语义展示动态脱敏，不能把"客户端自报"当已授权。"""
+    demo = _read(SERVER_DIR / "scripts" / "demo.ps1")
+    assert "FLOWMASK_REVEAL_OPERATORS" in demo
+    assert "客户端自报 authorized=true 未获服务端授权" in demo
+    assert "full_access" in demo
