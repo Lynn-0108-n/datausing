@@ -59,7 +59,7 @@ scripts\stop_local.cmd                            # 停止全部
 ### 2.2 手动启动（分步调试用）
 
 ```powershell
-python -m pytest -o addopts="" -q    # 386 个用例（385 通过 + 1 跳过）
+python -m pytest -o addopts="" -q    # 397 个用例（396 通过 + 1 跳过）
 python -m bench --markdown-out ../docs/性能报告.md   # 性能基准（L1/端到端/L2；加 --l3-endpoint 测 L3）
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
 # 构建正式前端（可选，需 Node 18+；产物在 ../web/dist）
@@ -99,6 +99,9 @@ curl.exe -s "http://127.0.0.1:8090/api/v1/alerts?level=L3"
 curl.exe -s "http://127.0.0.1:8090/api/v1/alerts/summary"
 curl.exe -s -X POST http://127.0.0.1:8090/api/v1/alerts/1/ack -H "Content-Type: application/json" `
   -d '{\"status\":\"ack\",\"note\":\"已通知业务方脱敏\"}'
+
+# 7) 扩展点总览：内置 4 引擎 / 4 算子 / 6 解析器；第三方插件加载失败只在 warnings 里提示
+curl.exe -s "http://127.0.0.1:8090/api/v1/plugins"
 ```
 
 ## 3. 多模型协同（L2 推理服务）
@@ -373,6 +376,7 @@ python -m app.evaluate     # 默认 L1 only，几秒钟出结果
 | PUT | `/preferences` | 保存界面偏好：`{"theme": "light\|dark\|system"}` |
 | DELETE | `/preferences` | 清除当前操作人偏好（回落服务端默认主题） |
 | GET | `/keywords` | 当前生效的敏感词表（`tier`/`limit` 过滤；返回总条目数与三级分布） |
+| GET | `/plugins` | 已注册的引擎 / 算子 / 解析器（含第三方插件加载状态与 `warnings`） |
 
 鉴权：设置 `FLOWMASK_API_TOKEN` 后，`/api/v1/*` 需 `Authorization: Bearer <token>`；留空即本机演示模式。
 
@@ -450,16 +454,19 @@ dumpcap -i 1 -w data/live.pcapng -b filesize:10240   # pcapng 同样是支持的
 | `FLOWMASK_MAX_UPLOAD_MB` | `20` | 上传大小上限 |
 | `FLOWMASK_CORS_ORIGINS` | 本机 5173/8080 | 允许跨域的前端地址，逗号分隔 |
 | `FLOWMASK_DISABLE_DECODE` | 空（开启） | 设为 1 关闭 base64 / 百分号编码的载荷解码复核 |
+| `FLOWMASK_ALERT_MIN_LEVEL` | `L1` | 告警阈值：级别 ≥ 该值才进告警队列（`L3` 只看高危） |
+| `FLOWMASK_PLUGINS` | 空 | 第三方插件入口，逗号分隔的 `module:register`（缺省 register） |
 
 ## 9. 代码结构
 
 ```text
 server/
   app/
-    main.py            FastAPI 入口（建库 → 规则启停 → 挂路由）
+    main.py            FastAPI 入口（建库 → 规则启停 → 插件加载 → 挂路由）
+    plugins.py         插件注册表：engine/operator/parser 扩展点（内置 + FLOWMASK_PLUGINS）
     core/
       config.py        Settings（环境变量，frozen dataclass + lru_cache）
-      db.py            sqlite3 封装：tasks/findings/audit_log/rules/user_prefs 五张表 + 写锁 + WAL
+      db.py            sqlite3 封装：tasks/findings/alerts/audit_log/rules/user_prefs 六张表 + 写锁 + WAL
     parsers/           输入分段：text/json/csv/sql/docx/pdf + registry 统一入口（PDF 依赖可选 pdfplumber）
     webui/
       index.html       自带单页界面：上传/粘贴 → 左原文高亮 / 右脱敏副本（无需前端工具链）
@@ -494,7 +501,7 @@ l3_training/         L3 指令微调：金标→指令样本、LoRA 训练、权
   l3_service/          L3 推理服务（mock / hf / instruct 后端 + /v1/judge”）
   samples/             自带示例抓包生成脚本与 demo-traffic.pcap
   eval/                评测集（351 条主集 + 200 条 NER 压力集）与评测说明
-  tests/               386 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警
+  tests/               397 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表
   pyproject.toml
   requirements.txt     运行依赖（固定版本）
   requirements-ml.txt  可选：L2/L3/NER/训练与导出
@@ -524,6 +531,7 @@ web/                   正式前端（Vue3 + Element Plus + ECharts，Vite 构�
 5. **模块化便于扩展**：解析器、识别器、算子、导出格式都是小函数/协议 + 注册表，新增格式或模型不需改主流程。
 6. **导出可离线验签**：`/audit/export` 的 jsonl/json/csv 自带 `prev_hash` 与 `signature`，用 `python -m scripts.verify_export <文件>` 在任意机器复算整条哈希链（不连数据库、不起服务，密钥用 `--secret` 或 `FLOWMASK_AUDIT_SECRET`），断链会报出 `broken_at` 与原因；接口默认只导最近 200 条，脚本会把这种情况标为「部分链」，加 `--require-genesis` 则直接判失败。
 7. **检测 → 告警 → 处置闭环**：任务落库 findings 的同时按级别生成告警（L3 紧急 / L2 重要 / L1 提示，阈值 `FLOWMASK_ALERT_MIN_LEVEL` 可调），每条告警带与四级脱敏模板同口径的处置建议；`/alerts` 支持过滤、汇总与认领/忽略，处理人与备注留痕。
+8. **扩展点有登记处**：`app/plugins.py` 把引擎（L1/L2/L3/NER）、隐私算子、解析器统一登记，`GET /plugins` 可查内置清单与就绪状态；第三方插件以 `FLOWMASK_PLUGINS=module:register` 在启动时接入，加载失败只记 `warnings`、不影响主链路——「可扩展」而不是「可被插件拖垮」。
 
 ## 11. 性能基准（本机实测）
 

@@ -94,6 +94,8 @@ class Settings:
     # 告警触发阈值：检测结果级别 ≥ 该值才生成告警（L3/L2/L1/SAFE）。
     # 默认 L1：所有敏感命中都进告警队列；演示"只看高危"可设 FLOWMASK_ALERT_MIN_LEVEL=L3。
     alert_min_level: str
+    # 第三方插件：逗号分隔的 ``module:register`` 入口；空表示只用内置插件。
+    plugin_modules: str
 
     @classmethod
     def load(cls) -> "Settings":
@@ -123,6 +125,7 @@ class Settings:
             ner_device=_env_str("NER_DEVICE", "cpu").strip().lower(),
             default_theme=_parse_theme(_env_str("DEFAULT_THEME", "system")),
             alert_min_level=_parse_level(_env_str("ALERT_MIN_LEVEL", "L1")),
+            plugin_modules=_env_str("PLUGINS", ""),
         )
 
 

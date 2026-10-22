@@ -30,6 +30,7 @@ from .api.routes_detect import router as detect_router
 from .api.routes_findings import router as findings_router
 from .api.routes_health import router as health_router
 from .api.routes_keywords import router as keywords_router
+from .api.routes_plugins import router as plugins_router
 from .api.routes_dynamic import router as dynamic_router
 from .api.routes_preferences import router as preferences_router
 from .api.routes_rules import router as rules_router
@@ -40,6 +41,7 @@ from .api.routes_traffic import router as traffic_router
 from .core.paths import frontend_dir, resource_root
 from .core.config import get_settings
 from .core.db import get_database
+from .plugins import load_plugins
 from .traffic.live import get_live_manager
 
 # 自带单页控制台随包分发：开发态是 server/app/webui，打包后是解包目录下的 app/webui
@@ -76,6 +78,8 @@ def create_app() -> FastAPI:
     db = get_database()
     db.init()
     sync_active_rules(db)
+    # 内置插件 + 第三方插件（FLOWMASK_PLUGINS）在启动时登记一次；失败只记警告
+    load_plugins(settings)
 
     app = FastAPI(
         lifespan=_lifespan,
@@ -89,6 +93,7 @@ def create_app() -> FastAPI:
             {"name": "traffic", "description": "流量接入：pcap 导入 / 外部推送 / 实时旁路跟随 → 同一套识别分级与审计"},
             {"name": "findings", "description": "检测结果查询"},
             {"name": "alerts", "description": "分级告警与脱敏建议（检测 → 告警 → 处置）"},
+            {"name": "plugins", "description": "可扩展：引擎 / 算子 / 解析器插件注册表"},
             {"name": "stats", "description": "看板统计"},
             {"name": "rules", "description": "内置/自定义敏感规则"},
             {"name": "audit", "description": "审计溯源与哈希链校验"},
@@ -112,6 +117,7 @@ def create_app() -> FastAPI:
         traffic_router,
         findings_router,
         alerts_router,
+        plugins_router,
         stats_router,
         rules_router,
         audit_router,
