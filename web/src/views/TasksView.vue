@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, ref } from "vue";
 import { ElMessage } from "element-plus";
-import { api } from "../api";
+import { api, authHeaders } from "../api";
 
 const tasks = ref([]);
 const findings = ref([]);
@@ -14,39 +14,54 @@ const textInput = ref("");
 // 隐私导出参数：epsilon 越小噪声越大；l 是 l-多样性下限
 const epsilon = ref(1.0);
 const diversityL = ref(3);
+// 请求序号：刷新列表/切换任务时，晚到的旧响应直接丢弃，避免覆盖新状态
+let loadTasksSeq = 0;
+let loadAuditSeq = 0;
+let openTaskSeq = 0;
 
 async function loadTasks() {
+  const seq = ++loadTasksSeq;
   loading.value = true;
   try {
     const body = await api.tasks(1, 20);
+    if (seq !== loadTasksSeq) return;
     tasks.value = body.items || [];
     // 默认展开最新任务：结果与「隐私导出」都在详情面板里，省掉一次点击
     if (!current.value && tasks.value.length) {
       await openTask(tasks.value[0]);
     }
   } catch (err) {
+    if (seq !== loadTasksSeq) return;
     ElMessage.error(`加载任务失败：${err}`);
   } finally {
-    loading.value = false;
+    if (seq === loadTasksSeq) loading.value = false;
   }
 }
 
 async function loadAudit() {
+  const seq = ++loadAuditSeq;
   try {
     const body = await api.audit(1, 20);
+    const verified = await api.auditVerify();
+    if (seq !== loadAuditSeq) return;
     audit.value = body.items || [];
-    verify.value = await api.auditVerify();
+    verify.value = verified;
   } catch (err) {
+    if (seq !== loadAuditSeq) return;
     ElMessage.error(`加载审计链失败：${err}`);
   }
 }
 
 async function openTask(row) {
+  const seq = ++openTaskSeq;
   current.value = row;
+  findings.value = [];
   try {
     const body = await api.taskFindings(row.id, 1, 100);
+    if (seq !== openTaskSeq) return;
     findings.value = body.items || [];
   } catch (err) {
+    if (seq !== openTaskSeq) return;
     ElMessage.error(`加载任务详情失败：${err}`);
   }
 }
@@ -81,12 +96,42 @@ function exportUrl(fmt) {
   return current.value ? api.taskExportUrl(current.value.id, fmt) : "#";
 }
 
+// 文件名：优先 Content-Disposition 的 filename*=UTF-8''（支持中文名），退化到 filename="..."。
+function fileNameFromDisposition(header) {
+  if (!header) return "";
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(header);
+  if (utf8) {
+    try {
+      return decodeURIComponent(utf8[1].trim());
+    } catch {
+      /* 编码异常就退回 filename= */
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(header);
+  return plain ? plain[1].trim() : "";
+}
+
+// 导出走 fetch 拿 Blob 再 <a download> 落盘：
+// - 不再先整份拉一遍再 window.open（弹窗可能被拦、有 token 时 window.open 带不上 Authorization）；
+// - 文件名优先取服务端 Content-Disposition，取不到用 flowmask-<id>.<fmt>。
 async function copyExport(fmt) {
   if (!current.value) return;
+  const id = current.value.id;
+  const url = api.taskExportUrl(id, fmt);
   try {
-    const res = await fetch(api.taskExportUrl(current.value.id, fmt));
+    const res = await fetch(url, { headers: authHeaders() });
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    window.open(api.taskExportUrl(current.value.id, fmt), "_blank");
+    const blob = await res.blob();
+    const name = fileNameFromDisposition(res.headers.get("Content-Disposition")) || `flowmask-${id}.${fmt}`;
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    // click 后立刻 revoke 在部分浏览器会取不到内容，放到下一轮事件循环再清理
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
   } catch (err) {
     ElMessage.error(`导出失败：${err}`);
   }

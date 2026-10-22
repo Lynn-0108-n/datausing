@@ -9,7 +9,10 @@
 - demo.sh 不能读 DetectOut 顶层不存在的 level/types；
 - 停止脚本必须先核对进程命令行，不能只信 pid 文件；
 - 启动脚本要先做端口试绑预检；
-- 上传脚本不能把变量拼进 Invoke-Expression。
+- 上传脚本不能把变量拼进 Invoke-Expression；
+- 任务导出必须走 Blob 下载（能带 Authorization，也不被弹窗拦截）；
+- 批量结果的高危/中危要按 /stats 全量统计，不能只数前 100 条 findings；
+- 列表/轮询/详情请求要有序号保护，晚到的旧响应必须丢弃。
 """
 
 from pathlib import Path
@@ -82,3 +85,45 @@ def test_start_script_prechecks_ports_before_spawn():
 def test_upload_script_does_not_use_invoke_expression():
     deploy = REPO_DIR / "deploy" / "upload-netmon.ps1"
     assert "Invoke-Expression" not in _read(deploy)
+
+
+def test_tasks_view_export_uses_blob_download_with_auth():
+    view = _read(WEB_SRC / "views" / "TasksView.vue")
+    # Blob + <a download>，不再先整份 fetch 再 window.open
+    assert "createObjectURL" in view
+    assert "revokeObjectURL" in view
+    assert 'document.createElement("a")' in view
+    assert "window.open(api.taskExportUrl" not in view
+    # 有 FLOWMASK_API_TOKEN 时导出也要带 Authorization，文件名优先取响应头
+    assert "authHeaders" in view
+    assert "Content-Disposition" in view
+
+
+def test_tasks_view_discards_stale_responses():
+    view = _read(WEB_SRC / "views" / "TasksView.vue")
+    assert "loadTasksSeq" in view
+    assert "loadAuditSeq" in view
+    assert "openTaskSeq" in view
+    assert "seq !== loadTasksSeq" in view
+    assert "seq !== openTaskSeq" in view
+
+
+def test_batch_view_summary_uses_full_task_stats():
+    view = _read(WEB_SRC / "views" / "BatchView.vue")
+    assert "api.stats(" in view
+    assert "by_level" in view
+    # 不能再从"前 100 条 findings"里数高危/中危
+    assert 'item.level === "L3"' not in view
+    assert 'item.level === "L2"' not in view
+
+
+def test_batch_view_discards_stale_poll_and_submit_responses():
+    view = _read(WEB_SRC / "views" / "BatchView.vue")
+    assert "refreshSeq" in view
+    assert "submitSeq" in view
+    assert "openTaskSeq" in view
+    assert "seq !== refreshSeq" in view
+    assert "seq !== submitSeq" in view
+    assert "seq !== openTaskSeq" in view
+    # 汇总被丢弃的已完成任务要能在下一轮补统计，不能永远停在 0
+    assert "statsLoaded" in view

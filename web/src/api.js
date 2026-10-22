@@ -2,7 +2,7 @@ const BASE = "/api/v1";
 
 // 服务端配了 FLOWMASK_API_TOKEN 时，所有请求都要带 Bearer；
 // 前端不内置登录页，运维在浏览器 localStorage 里写 flowmask_token 即可（README 有说明）。
-function authHeaders(base = {}) {
+export function authHeaders(base = {}) {
   const headers = { ...base };
   try {
     const token = window.localStorage.getItem("flowmask_token");

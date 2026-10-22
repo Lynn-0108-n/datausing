@@ -18,6 +18,10 @@ const options = reactive({
   enableNer: false,
 });
 let pollTimer = null;
+// 请求序号：每轮轮询/每次提交/每次查看各一份，晚到的旧响应直接丢弃
+let refreshSeq = 0;
+let submitSeq = 0;
+let openTaskSeq = 0;
 
 const canRun = computed(() => files.value.length > 0 && !running.value);
 const doneCount = computed(() => rows.value.filter((row) => ["done", "failed", "解析失败"].includes(row.status)).length);
@@ -35,6 +39,10 @@ function clearAll() {
   findings.value = [];
   activeTask.value = "";
   findingsTotal.value = 0;
+  // 让仍在飞行中的提交/轮询/详情请求作废，回来也不再写状态
+  submitSeq += 1;
+  refreshSeq += 1;
+  openTaskSeq += 1;
   stopPolling();
 }
 
@@ -47,23 +55,28 @@ function rowFor(filename, item) {
     findings: 0,
     l3: 0,
     l2: 0,
+    statsLoaded: false,
     error: item.error || "",
   };
 }
 
 async function run() {
   if (!files.value.length) return;
+  const seq = ++submitSeq;
   running.value = true;
   rows.value = [];
   activeTask.value = "";
   findings.value = [];
   try {
     const body = await api.batchTasks(files.value, options);
+    // 提交期间被「清空」或重新提交：旧结果直接丢弃
+    if (seq !== submitSeq) return;
     rows.value = body.items.map((item) => rowFor(item.filename, item));
     const accepted = body.items.filter((item) => item.task_id).length;
     ElMessage.success(`已提交 ${accepted}/${body.total} 个文件，正在后台检测…`);
     startPolling();
   } catch (err) {
+    if (seq !== submitSeq) return;
     ElMessage.error(`批量提交失败：${err}`);
     running.value = false;
   }
@@ -83,26 +96,38 @@ function stopPolling() {
 }
 
 async function refresh() {
-  const pending = rows.value.filter((row) => row.taskId && ["pending", "running"].includes(row.status));
+  // 待办 = 还在跑的任务 + 已完成但汇总被丢弃（seq 过期）的任务，后者下一轮自动补统计
+  const pending = rows.value.filter((row) => {
+    if (!row.taskId) return false;
+    if (["pending", "running"].includes(row.status)) return true;
+    return row.status === "done" && !row.statsLoaded;
+  });
   if (!pending.length) {
     stopPolling();
     running.value = false;
     return;
   }
+  const seq = ++refreshSeq;
   await Promise.all(
     pending.map(async (row) => {
       try {
         const task = await api.task(row.taskId);
+        if (seq !== refreshSeq) return;
         row.status = task.status;
         row.segments = task.total_segments ?? row.segments;
         row.findings = task.total_findings ?? 0;
         if (task.status === "failed") row.error = task.error || "检测失败";
         if (task.status === "done") {
-          const page = await api.taskFindings(row.taskId, 1, 100);
-          row.l3 = page.items.filter((item) => item.level === "L3").length;
-          row.l2 = page.items.filter((item) => item.level === "L2").length;
+          // 高危/中危用 /stats 全量统计：之前只取 findings 前 100 条，命中多时会少算
+          const stats = await api.stats(row.taskId);
+          if (seq !== refreshSeq) return;
+          row.l3 = Number((stats.by_level || {}).L3 || 0);
+          row.l2 = Number((stats.by_level || {}).L2 || 0);
+          row.findings = stats.total_findings ?? row.findings;
+          row.statsLoaded = true;
         }
       } catch (err) {
+        if (seq !== refreshSeq) return;
         row.error = String(err);
       }
     })
@@ -111,12 +136,17 @@ async function refresh() {
 
 async function openTask(row) {
   if (!row.taskId) return;
+  const seq = ++openTaskSeq;
   activeTask.value = row.taskId;
+  findings.value = [];
+  findingsTotal.value = 0;
   try {
     const page = await api.taskFindings(row.taskId, 1, 50);
+    if (seq !== openTaskSeq) return;
     findings.value = page.items;
     findingsTotal.value = page.total;
   } catch (err) {
+    if (seq !== openTaskSeq) return;
     ElMessage.error(`加载结果失败：${err}`);
   }
 }
@@ -137,7 +167,13 @@ function preview(text, limit = 60) {
   return value.length > limit ? `${value.slice(0, limit)}…` : value;
 }
 
-onBeforeUnmount(stopPolling);
+onBeforeUnmount(() => {
+  // 离开页面时让所有在飞请求作废，卸载后不再写响应式状态
+  submitSeq += 1;
+  refreshSeq += 1;
+  openTaskSeq += 1;
+  stopPolling();
+});
 </script>
 
 <template>
