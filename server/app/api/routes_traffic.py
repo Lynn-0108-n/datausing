@@ -23,7 +23,7 @@ from ..parsers.base import Document, Segment
 from ..tasks.service import create_task
 from ..traffic import PcapError, TrafficParseError, build_document
 from ..traffic.live import LiveError, LiveStats, get_live_manager
-from .deps import build_options, db_dep, operator_dep, pipeline_dep, settings_dep
+from .deps import build_options, db_dep, operator_dep, pipeline_dep, read_upload_limited, reject_safe_mask_level, settings_dep
 from .schemas import (
     LiveListOut,
     LiveOut,
@@ -81,13 +81,8 @@ async def import_traffic(
     pipeline: DetectionPipeline = Depends(pipeline_dep),
     operator=Depends(operator_dep),
 ) -> TrafficImportOut:
-    data = await pcap.read()
-    limit = settings.max_upload_mb * 1024 * 1024
-    if len(data) > limit:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"文件超过上限 {settings.max_upload_mb} MB",
-        )
+    reject_safe_mask_level(mask_level)
+    data = await read_upload_limited(pcap, settings.max_upload_mb * 1024 * 1024)
     if not data:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="文件内容为空")
 
@@ -143,6 +138,7 @@ def ingest_traffic(
     pipeline: DetectionPipeline = Depends(pipeline_dep),
     operator=Depends(operator_dep),
 ) -> TrafficIngestOut:
+    reject_safe_mask_level(payload.mask_level)
     segments = [
         Segment(path=item.path, text=item.text, hint=item.hint) for item in payload.segments
     ]

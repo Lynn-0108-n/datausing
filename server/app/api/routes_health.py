@@ -27,7 +27,7 @@ def health(settings: Settings = Depends(settings_dep), db: Database = Depends(db
     return HealthOut(
         status="ok",
         version=__version__,
-        db_path=str(db.path),
+        db_path=db.path.name,
         enable_l2=settings.enable_l2,
         enable_l3=settings.enable_l3,
         keywords=len(keywords.terms),

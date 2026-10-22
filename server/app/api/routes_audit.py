@@ -24,6 +24,7 @@ from ..audit.chain import (
     verify_chain,
 )
 from ..core.db import Database
+from ..tasks.export import sanitize_csv_cell
 from .deps import db_dep
 from .schemas import AuditOut, AuditPage, VerifyOut
 
@@ -152,7 +153,7 @@ def export_audit(
 
 
 def _cell(value: Any) -> Any:
-    """CSV 里把 dict/list 压成 JSON 字符串，避免出现 "[object Object]" 之类。"""
+    """CSV 单元格处理：dict/list 压成 JSON 字符串，并防公式注入。"""
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)
-    return value
+        value = json.dumps(value, ensure_ascii=False)
+    return sanitize_csv_cell(value)

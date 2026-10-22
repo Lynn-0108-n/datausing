@@ -16,8 +16,8 @@ from ..parsers.registry import parse_bytes, parse_text_input
 from ..privacy import DEFAULT_EPSILON, DEFAULT_L, export_with_privacy
 from ..tasks.export import EXPORT_FORMATS, export_findings
 from ..tasks.service import create_task, get_task, list_tasks, page_findings
-from .deps import build_options, db_dep, operator_dep, pipeline_dep, settings_dep
-from .schemas import BatchItemOut, BatchTasksOut, FindingOut, FindingPage, TaskCreateOut, TaskOut, TaskPage
+from .deps import build_options, db_dep, operator_dep, pipeline_dep, read_upload_limited, reject_safe_mask_level, settings_dep
+from .schemas import BatchItemOut, BatchTasksOut, FindingOut, FindingPage, TaskCreateOut, TaskOut, TaskPage, TextTaskIn
 
 router = APIRouter(tags=["tasks"])
 
@@ -37,13 +37,8 @@ async def create_file_task(
     db: Database = Depends(db_dep),
     pipeline: DetectionPipeline = Depends(pipeline_dep),
 ) -> TaskCreateOut:
-    data = await file.read()
-    limit = settings.max_upload_mb * 1024 * 1024
-    if len(data) > limit:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"文件超过上限 {settings.max_upload_mb} MB",
-        )
+    reject_safe_mask_level(mask_level)
+    data = await read_upload_limited(file, settings.max_upload_mb * 1024 * 1024)
     try:
         document = parse_bytes(file.filename or "", data)
     except ParseUnsupported as exc:
@@ -71,21 +66,22 @@ async def create_file_task(
 
 @router.post("/tasks/text", response_model=TaskCreateOut, summary="提交任务：粘贴文本")
 def create_text_task(
-    payload: dict,
+    payload: TextTaskIn,
     settings: Settings = Depends(settings_dep),
     db: Database = Depends(db_dep),
     pipeline: DetectionPipeline = Depends(pipeline_dep),
 ) -> TaskCreateOut:
-    text = str(payload.get("text") or "")
+    reject_safe_mask_level(payload.mask_level)
+    text = payload.text
     if not text.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="text 不能为空")
     document = parse_text_input(text, source="text")
     options = build_options(
-        enable_l2=bool(payload.get("enable_l2", False)) or settings.enable_l2,
-        enable_l3=bool(payload.get("enable_l3", False)) or settings.enable_l3,
-        enable_ner=bool(payload.get("enable_ner", False)) or settings.enable_ner,
-        mask_level=payload.get("mask_level"),
-        min_level=str(payload.get("min_level") or "SAFE"),
+        enable_l2=payload.enable_l2 or settings.enable_l2,
+        enable_l3=payload.enable_l3 or settings.enable_l3,
+        enable_ner=payload.enable_ner or settings.enable_ner,
+        mask_level=payload.mask_level,
+        min_level=payload.min_level,
     )
     task_id = create_task(
         db,
@@ -122,6 +118,7 @@ async def create_batch_tasks(
     """
     if not files:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="至少上传一个文件")
+    reject_safe_mask_level(mask_level)
     if len(files) > MAX_BATCH_FILES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -139,9 +136,10 @@ async def create_batch_tasks(
     items: list[BatchItemOut] = []
     for upload in files:
         name = upload.filename or "upload"
-        data = await upload.read()
-        if len(data) > limit:
-            items.append(BatchItemOut(filename=name, error=f"文件超过上限 {settings.max_upload_mb} MB"))
+        try:
+            data = await read_upload_limited(upload, limit)
+        except HTTPException as exc:
+            items.append(BatchItemOut(filename=name, error=str(exc.detail)))
             continue
         try:
             document = parse_bytes(name, data)

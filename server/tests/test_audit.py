@@ -268,3 +268,23 @@ def test_legacy_v1_signature_is_accepted_with_warning(database) -> None:
     result = verify_chain(database)
     assert result["ok"] is True
     assert result["legacy_rows"] == 1
+
+
+def test_audit_csv_escapes_formula_injection(client, database) -> None:
+    """operator_id/user_id 来自请求头，CSV 导出必须加前导单引号防公式执行。"""
+    append_entry(
+        database,
+        task_id="formula",
+        input_hash=canonical_hash({"i": "formula"}),
+        output_hash=canonical_hash({"o": "formula"}),
+        model_chain="l1",
+        confidence_vector="[]",
+        rule_id="idcard18",
+        operator_id="=cmd|' /C calc'!A0",
+        user_id="+1",
+    )
+    response = client.get("/api/v1/audit/export?format=csv")
+    assert response.status_code == 200
+    body = response.content.decode("utf-8-sig")
+    assert "'=cmd" in body, "以 = 开头的单元格应被转义"
+    assert "'+1" in body, "以 + 开头的单元格应被转义"

@@ -28,6 +28,17 @@ class DetectRequest(BaseModel):
     min_level: str = Field(default="SAFE", description="只返回 ≥ 该级别的结果（SAFE/L1/L2/L3）")
 
 
+class TextTaskIn(BaseModel):
+    """提交文本任务请求（会落库，因此有长度上限且不允许 mask_level=SAFE）。"""
+
+    text: str = Field(min_length=1, max_length=200_000, description="待检测文本（最长 20 万字符）")
+    enable_l2: bool = Field(default=False, description="是否启用 L2 语义识别（需推理服务在线）")
+    enable_l3: bool = Field(default=False, description="是否启用 L3 本地大模型复核（需 Ollama 在线）")
+    enable_ner: bool = Field(default=False, description="是否启用 L1.5 实体识别（人名/地址）")
+    mask_level: str | None = Field(default=None, description="强制按该级别脱敏；任务落库不接受 SAFE")
+    min_level: str = Field(default="SAFE", description="只返回 ≥ 该级别的结果（SAFE/L1/L2/L3）")
+
+
 class SpanOut(BaseModel):
     """命中区间：前端据此在原文上高亮（偏移是字符下标，不含敏感值本身）。"""
 

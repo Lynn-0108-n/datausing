@@ -1,4 +1,4 @@
-﻿"""即时检测：文本粘贴 / 文件上传。
+"""即时检测：文本粘贴 / 文件上传。
 
 这两个接口**不落库**，用于"脱敏前/后左右对照"的现场演示；
 需要留痕与审计时走 ``POST /api/v1/tasks``（后台任务，写 findings + 审计链）。
@@ -14,7 +14,7 @@ from ..identify.pipeline import DocumentReport
 from ..parsers.base import Document, ParseError, ParseUnsupported
 from ..parsers.registry import parse_bytes, parse_text_input, supported_formats
 from ..tasks.export import masked_document
-from .deps import build_options, pipeline_dep, settings_dep
+from .deps import build_options, pipeline_dep, read_upload_limited, settings_dep
 from .schemas import DetectOut, DetectRequest, SegmentOut, SpanOut
 
 router = APIRouter(tags=["detect"])
@@ -77,13 +77,7 @@ async def detect_file(
     settings: Settings = Depends(settings_dep),
     pipeline: DetectionPipeline = Depends(pipeline_dep),
 ) -> DetectOut:
-    data = await file.read()
-    limit = settings.max_upload_mb * 1024 * 1024
-    if len(data) > limit:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"文件超过上限 {settings.max_upload_mb} MB",
-        )
+    data = await read_upload_limited(file, settings.max_upload_mb * 1024 * 1024)
     try:
         document = parse_bytes(file.filename or "", data)
     except ParseUnsupported as exc:

@@ -23,6 +23,8 @@ def _wait_done(client, task_id: str, timeout: float = 5.0) -> dict:
 def test_health(client) -> None:
     body = client.get("/api/v1/health").json()
     assert body["status"] == "ok" and body["version"]
+    # /health 不暴露服务器绝对路径（只回文件名）
+    assert body["db_path"] == "flowmask.db"
 
 
 def test_detect_text_returns_masked_only(client) -> None:
@@ -46,6 +48,62 @@ def test_detect_returns_highlight_spans(client) -> None:
     cut = {text[span["start"]:span["end"]] for span in spans}
     assert PHONE in cut and ID_CARD in cut
     assert all(span["label"] and span["rule"] for span in spans)
+
+
+def test_masked_document_keeps_safe_text(client) -> None:
+    """安全文本没有命中时，脱敏副本应回退原文，而不是空串。"""
+    text = "这是一段没有任何敏感信息的普通说明文本。"
+    body = client.post("/api/v1/detect", json={"text": text}).json()
+    assert body["findings"] == []
+    masked = body["masked_document"]
+    assert masked["content_type"] == "text"
+    assert masked["masked"] == text
+
+
+def test_masked_document_ignores_min_level_filter(client) -> None:
+    """min_level 只筛展示的 findings，脱敏副本仍要覆盖低危命中。"""
+    body = client.post("/api/v1/detect", json={"text": f"联系电话 {PHONE}", "min_level": "L3"}).json()
+    assert body["findings"] == []
+    masked = body["masked_document"]["masked"]
+    assert PHONE not in masked, "低危命中被筛掉后不能在脱敏副本里回显原文"
+
+
+def test_task_text_rejects_safe_mask_level(client) -> None:
+    """落库任务不能选 SAFE：库里只存脱敏副本，原文不允许落库。"""
+    response = client.post("/api/v1/tasks/text", json={"text": f"电话 {PHONE}", "mask_level": "SAFE"})
+    assert response.status_code == 400
+    assert "mask_level" in response.json()["detail"]
+    # 即时检测仍然允许"不脱敏"（不落库）
+    assert client.post("/api/v1/detect", json={"text": "普通文本", "mask_level": "SAFE"}).status_code == 200
+
+
+def test_task_text_validates_payload_types_and_size(client) -> None:
+    """粘贴文本任务走 Pydantic 模型：类型错误/超长是 422，不再 500 或静默转串。"""
+    assert client.post("/api/v1/tasks/text", json={"text": {"a": 1}}).status_code == 422
+    assert client.post("/api/v1/tasks/text", json={"text": "x", "mask_level": 123}).status_code == 422
+    big = "a" * 200_001
+    assert client.post("/api/v1/tasks/text", json={"text": big}).status_code == 422
+
+
+def test_operator_header_rejects_overlong_value(client) -> None:
+    response = client.post(
+        "/api/v1/traffic/ingest",
+        json={"source": "agent", "content_type": "text", "segments": [{"path": "$", "text": "普通文本"}]},
+        headers={"X-Operator-Id": "a" * 65},
+    )
+    assert response.status_code == 400
+    assert "64" in response.json()["detail"]
+
+
+def test_csv_cell_sanitizer_blocks_formulas() -> None:
+    from app.tasks.export import sanitize_csv_cell
+
+    assert sanitize_csv_cell("=1+1") == "'=1+1"
+    assert sanitize_csv_cell("+66") == "'+66"
+    assert sanitize_csv_cell("-2") == "'-2"
+    assert sanitize_csv_cell("@SUM(A1)") == "'@SUM(A1)"
+    assert sanitize_csv_cell("正常文本") == "正常文本"
+    assert sanitize_csv_cell(12) == 12
 
 
 def test_ui_page_and_root_redirect(client) -> None:
@@ -218,6 +276,25 @@ def test_bearer_token_enforced(tmp_env, monkeypatch) -> None:
         assert protected.get("/api/v1/health", headers={"Authorization": "Bearer wrong"}).status_code == 401
         ok = protected.get("/api/v1/health", headers={"Authorization": "Bearer s3cret"})
         assert ok.status_code == 200
+
+def test_upload_size_limited_before_full_read(tmp_env, monkeypatch) -> None:
+    """上传超过 max_upload_mb 时立即 413，不再把整个文件读进内存。"""
+    monkeypatch.setenv("FLOWMASK_MAX_UPLOAD_MB", "1")
+    from fastapi.testclient import TestClient
+
+    from app.core.config import get_settings
+    from app.main import create_app
+
+    get_settings.cache_clear()
+    payload = b"a" * (2 * 1024 * 1024)
+    files = {"file": ("big.txt", payload)}
+    with TestClient(create_app()) as protected:
+        assert protected.post("/api/v1/detect/file", files=files).status_code == 413
+        assert protected.post("/api/v1/tasks", files=files).status_code == 413
+        batch = protected.post("/api/v1/tasks/batch", files=[("files", ("big.txt", payload))])
+        assert batch.status_code == 201
+        assert "超过上限" in batch.json()["items"][0]["error"]
+
 
 def test_health_reports_ner_availability(client) -> None:
     """默认没开 NER 时，/health 明确告诉前端“不可用”，前端据此隐藏开关。"""

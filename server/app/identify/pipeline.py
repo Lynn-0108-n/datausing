@@ -246,6 +246,8 @@ class DocumentReport:
     content_type: str
     segments: int
     findings: list[SegmentFinding] = field(default_factory=list)
+    # min_level 过滤前的全部命中：用于生成完整脱敏副本（避免筛级别后副本丢段/为空）
+    all_findings: list[SegmentFinding] = field(default_factory=list)
     by_level: dict[str, int] = field(default_factory=dict)
     duration_ms: int = 0
     degraded: bool = False
@@ -276,6 +278,7 @@ class DetectionPipeline:
     def analyze_document(self, document: Document, options: DetectOptions) -> DocumentReport:
         started = time.perf_counter()
         findings: list[SegmentFinding] = []
+        all_findings: list[SegmentFinding] = []
         by_level = {level.value: 0 for level in Level}
         degraded = False
 
@@ -288,6 +291,7 @@ class DetectionPipeline:
                 continue
             degraded = degraded or finding.degraded
             by_level[finding.level.value] += 1
+            all_findings.append(finding)
             if finding.level.severity < options.min_level.severity:
                 continue
             findings.append(finding)
@@ -297,6 +301,7 @@ class DetectionPipeline:
             content_type=document.content_type,
             segments=document.segment_count,
             findings=findings,
+            all_findings=all_findings,
             by_level=by_level,
             duration_ms=int((time.perf_counter() - started) * 1000),
             degraded=degraded,
