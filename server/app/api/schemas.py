@@ -179,7 +179,15 @@ class RuleOut(BaseModel):
 class RuleIn(BaseModel):
     """自定义规则（正则 + 类别 + 权重）。"""
 
-    id: str = Field(min_length=2, max_length=32, pattern=r"^[a-z0-9_]+$")
+    # 前端「新增规则」表单没有 ID 输入项，省略时由服务端生成（custom_xxxxxxxx）；
+    # 保留显式传入的能力（脚本/API 用户希望固定 ID 时）。
+    id: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=32,
+        pattern=r"^[a-z0-9_]+$",
+        description="规则 ID；省略时自动生成",
+    )
     name: str = Field(min_length=1, max_length=64)
     type: str
     pattern: str = Field(min_length=1, max_length=500)

@@ -65,6 +65,40 @@ def test_detect_tolerates_rule_group_out_of_range() -> None:
     assert hits[0].value == "foo123"
 
 
+def test_custom_rule_without_id_gets_generated_id(client) -> None:
+    """前端「新增规则」表单没有 ID 字段：省略 id 时服务端生成，规则要能立即生效。"""
+    created = client.post(
+        "/api/v1/rules",
+        json={
+            "name": "工号-无ID",
+            "type": "secret",
+            "pattern": r"工号[：:]\s*([A-Z]{2}\d{6})",
+            "weight": 0.6,
+        },
+    )
+    assert created.status_code == 201, created.text
+    body = created.json()
+    assert re.fullmatch(r"[a-z0-9_]{2,32}", body["id"])
+
+    hit = client.post("/api/v1/detect", json={"text": "工号：AB123456"}).json()
+    assert hit["findings"], "自动生成 ID 的自定义规则也应当生效"
+
+    assert client.delete(f"/api/v1/rules/{body['id']}").status_code == 200
+
+
+def test_duplicate_custom_rule_id_conflicts(client) -> None:
+    """显式传 ID 时，重复创建应 409，而不是静默覆盖已有自定义规则。"""
+    payload = {
+        "id": "dup_rule",
+        "name": "重复",
+        "type": "secret",
+        "pattern": r"([A-Z]{2}\d{6})",
+        "weight": 0.5,
+    }
+    assert client.post("/api/v1/rules", json=payload).status_code == 201
+    assert client.post("/api/v1/rules", json=payload).status_code == 409
+
+
 def test_sync_active_rules_skips_dirty_rows(database) -> None:
     """库里存在脏数据（未知类别 / 无捕获组）时，同步不能抛异常拖垮启动。"""
     from app.api.routes_rules import sync_active_rules

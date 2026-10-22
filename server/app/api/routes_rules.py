@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, status
@@ -119,11 +120,14 @@ def list_rules(db: Database = Depends(db_dep)) -> list[RuleOut]:
 
 @router.post("/rules", response_model=RuleOut, status_code=status.HTTP_201_CREATED, summary="新增自定义规则")
 def create_rule(payload: RuleIn, db: Database = Depends(db_dep)) -> RuleOut:
-    if payload.id in _BUILTIN_IDS:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"规则 id 与内置规则重名: {payload.id}")
-    _upsert(db, payload.id, payload.name, payload.type, payload.pattern, payload.weight, payload.confidence, payload.enabled)
+    rule_id = payload.id or f"custom_{uuid.uuid4().hex[:8]}"
+    if rule_id in _BUILTIN_IDS:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"规则 id 与内置规则重名: {rule_id}")
+    if rule_id in _db_rows(db):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"自定义规则已存在: {rule_id}")
+    _upsert(db, rule_id, payload.name, payload.type, payload.pattern, payload.weight, payload.confidence, payload.enabled)
     sync_active_rules(db)
-    return _custom_out(_db_rows(db)[payload.id])
+    return _custom_out(_db_rows(db)[rule_id])
 
 
 @router.patch("/rules/{rule_id}", response_model=RuleOut, summary="启用/停用规则")
