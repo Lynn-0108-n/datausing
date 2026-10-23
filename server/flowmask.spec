@@ -21,6 +21,8 @@ datas = [
     ("app/webui", "app/webui"),
     # L1 敏感词表（keywords.py 用 Path(__file__).parent/"knowledge" 读取）
     ("app/identify/knowledge", "app/identify/knowledge"),
+    # 图标资源：系统托盘用 assets/flowmask-128.png（desktop.py 通过 paths.resource_root() 读取）
+    ("assets", "assets"),
     ("samples", "samples"),
     ("eval", "eval"),
 ]
@@ -37,6 +39,15 @@ hiddenimports = collect_submodules("app") + [
     "multipart",
     "pdfplumber",
 ]
+
+# 托盘是可选依赖（requirements-desktop.txt）：装了 pystray 才把它的 Windows 后端收进来，
+# 没装也能正常打包，只是 exe 里没有托盘（desktop.py 会优雅降级）。
+try:
+    import pystray  # noqa: F401
+
+    hiddenimports += ["pystray", "pystray._win32", "PIL.Image", "PIL.ImageDraw"]
+except Exception:  # noqa: BLE001 - 构建机没装 pystray 时不影响主功能
+    pass
 
 # 明确排除重依赖：它们只被 L2/L3/NER/训练侧使用，主服务运行时不 import
 excludes = [
@@ -92,5 +103,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,
+    # 图标与 Windows 版本资源：双击 exe / 任务栏 / 文件属性里显示的名称版本都来自这里
+    icon="assets/flowmask.ico",
+    version="assets/flowmask_version.txt",
 )

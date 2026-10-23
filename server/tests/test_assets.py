@@ -213,3 +213,48 @@ def test_demo_script_reflects_server_side_dynamic_auth():
     assert "FLOWMASK_REVEAL_OPERATORS" in demo
     assert "客户端自报 authorized=true 未获服务端授权" in demo
     assert "full_access" in demo
+
+
+def test_desktop_tray_is_optional_and_documented():
+    """托盘是可选能力：pystray 缺失/失败时必须静默降级，主服务照常启动。"""
+    source = _read(SERVER_DIR / "desktop.py")
+    assert "pystray" in source
+    assert "TRAY_TITLE" in source
+    assert "run_detached" in source
+    assert "托盘启动失败（不影响主服务）" in source
+    requirements = _read(SERVER_DIR / "requirements-desktop.txt")
+    assert "pystray" in requirements
+    assert "pillow" in requirements
+
+
+def test_installer_installs_for_current_user_with_icon():
+    """Inno Setup 安装包：当前用户安装（无管理员）、带图标、可卸载、出便携 zip。"""
+    iss = _read(SERVER_DIR / "installer" / "FlowMask.iss")
+    assert "PrivilegesRequired=lowest" in iss
+    assert "SetupIconFile=..\\assets\\flowmask.ico" in iss
+    assert "UninstallDisplayIcon=" in iss
+    assert "OutputBaseFilename=FlowMask-Setup-" in iss
+    assert "FlowMask.exe" in iss
+    build = _read(SERVER_DIR / "scripts" / "build_installer.ps1")
+    assert "ISCC.exe" in build
+    assert "dist_install" in build
+    assert "Compress-Archive" in build
+    assert "FlowMask-Portable-" in build
+    readme = SERVER_DIR / "installer" / "使用说明.txt"
+    assert readme.is_file()
+    assert "数据目录" in readme.read_text(encoding="utf-8")
+
+
+def test_icon_assets_are_bundled_and_used():
+    """图标资源：ICO 多尺寸容器、托盘 PNG、web favicon 与 index.html 引用保持一致。"""
+    ico = SERVER_DIR / "assets" / "flowmask.ico"
+    png = SERVER_DIR / "assets" / "flowmask-128.png"
+    assert ico.is_file() and ico.stat().st_size > 10_000
+    assert png.is_file() and png.stat().st_size > 1_000
+    assert ico.read_bytes()[:4] == b"\x00\x00\x01\x00"  # ICO 容器魔数，防止误存成 PNG
+    web_favicon = REPO_DIR / "web" / "public" / "favicon.ico"
+    assert web_favicon.is_file()
+    assert web_favicon.read_bytes() == ico.read_bytes(), "web/public/favicon.ico 应与 exe 图标一致"
+    index = _read(REPO_DIR / "web" / "index.html")
+    assert 'rel="icon"' in index
+    assert "/app/favicon.ico" in index

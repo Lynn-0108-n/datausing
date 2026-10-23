@@ -8,6 +8,11 @@
 4. 关掉那个应用窗口时默认**自动停服务**（``--keep-running`` 可关掉这个行为）；
 5. 另有 ``--stop``：通知正在运行的实例退出（桌面「停止」快捷方式用），不启动新服务。
 
+系统托盘（可选，依赖 ``requirements-desktop.txt`` 里的 pystray）：
+- 打包 exe 默认开启，源码运行默认关闭，可用 ``--tray`` / ``--no-tray`` 显式指定；
+- 托盘菜单：打开 FlowMask / 打开数据目录 / 退出 FlowMask；
+- 开启托盘时，关掉浏览器窗口不会停服务（服务驻留托盘），要退出请点托盘菜单「退出」。
+
 打包（PyInstaller）后资源/数据路径由 ``app/core/paths.py`` 决定：
 资源在解包目录、数据在 ``%LOCALAPPDATA%\\FlowMask\\data``、模型权重放 exe 同级 ``models/``。
 """
@@ -301,6 +306,115 @@ def _show_error(message: str) -> None:
         pass
 
 
+# --------------------------------------------------------------------------- 系统托盘（可选依赖 pystray）
+
+TRAY_TITLE = "FlowMask 分级脱敏与审计溯源"
+
+
+def _tray_enabled(explicit: bool | None) -> bool:
+    """托盘默认策略：打包 exe 默认开，源码运行默认关（避免开发时占托盘）。"""
+    if explicit is not None:
+        return explicit
+    return bool(getattr(sys, "frozen", False))
+
+
+def _tray_image():
+    """托盘图标：优先用打包进资源的 flowmask-128.png，缺失时用 PIL 画个盾牌兜底。"""
+    try:
+        from PIL import Image
+    except Exception:  # noqa: BLE001 - 没装 Pillow 就没有托盘，主服务不受影响
+        return None
+    with contextlib.suppress(Exception):
+        from app.core.paths import resource_root
+
+        png = resource_root() / "assets" / "flowmask-128.png"
+        if png.is_file():
+            return Image.open(png)
+    try:
+        from PIL import Image, ImageDraw
+
+        image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle([0, 0, 63, 63], radius=14, fill=(26, 74, 143, 255))
+        draw.polygon(
+            [(32, 9), (53, 17), (51, 35), (45, 46), (32, 55), (19, 46), (13, 35), (11, 17)],
+            fill=(247, 251, 255, 255),
+        )
+        return image
+    except Exception:  # noqa: BLE001 - 兜底图也画不出来就算了
+        return None
+
+
+def _start_tray(url: str, on_quit) -> object | None:
+    """启动系统托盘（pystray 缺失/失败时静默降级，返回 None）。"""
+    try:
+        import pystray
+    except Exception:  # noqa: BLE001 - 可选依赖，没装就不显示托盘
+        return None
+    image = _tray_image()
+    if image is None:
+        return None
+
+    data_dir = ""
+    with contextlib.suppress(Exception):
+        from app.core.paths import writable_root
+
+        data_dir = str(writable_root())
+
+    def _open_ui(_icon=None, _item=None) -> None:
+        webbrowser.open(url)
+
+    def _open_data(_icon=None, _item=None) -> None:
+        if data_dir:
+            with contextlib.suppress(OSError):
+                os.startfile(data_dir)  # noqa: S606 - 打开本机数据目录
+
+    def _quit(icon, _item=None) -> None:
+        print("[FlowMask] 收到托盘「退出」请求，正在停止服务…", flush=True)
+        with contextlib.suppress(Exception):
+            on_quit()
+        with contextlib.suppress(Exception):
+            icon.stop()
+
+    menu = pystray.Menu(
+        pystray.MenuItem("打开 FlowMask", _open_ui, default=True),
+        pystray.MenuItem("打开数据目录", _open_data, enabled=bool(data_dir)),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("退出 FlowMask", _quit),
+    )
+    try:
+        icon = pystray.Icon("FlowMask", image, TRAY_TITLE, menu)
+    except Exception as exc:  # noqa: BLE001 - 托盘失败不能拖垮主服务
+        print(f"[FlowMask] 托盘启动失败（不影响主服务）：{exc}", flush=True)
+        return None
+
+    failure: list[str] = []
+
+    def _tray_loop() -> None:
+        try:
+            # 等价于 pystray 的 run_detached()，但把建窗 / Shell_NotifyIcon 的异常接住：
+            # 受限会话（安全软件、组策略、远程桌面等）里托盘起不来时，日志里不能只有 traceback。
+            icon._run()  # noqa: SLF001 - run_detached 内部正是如此，只是它不捕获异常
+        except Exception as exc:  # noqa: BLE001
+            failure.append(str(exc))
+
+    threading.Thread(target=_tray_loop, daemon=True).start()
+    for _ in range(20):
+        if getattr(icon, "visible", False):
+            print("[FlowMask] 系统托盘已就绪（右键图标可退出）", flush=True)
+            return icon
+        if failure:
+            break
+        time.sleep(0.05)
+    print(
+        f"[FlowMask] 托盘未能显示（不影响主服务）：{failure[0] if failure else '等待超时'}",
+        flush=True,
+    )
+    with contextlib.suppress(Exception):
+        icon.stop()
+    return None
+
+
 def _self_check_report() -> str:
     """自检：把打包/运行相关的关键路径与可写性打成一份报告（``--self-check`` 用）。
 
@@ -347,6 +461,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--enable-l3", action="store_true", help="启用 L3 大模型复核（需 models/qwen2.5-1.5b-instruct 与已启动的 l3_service）")
     parser.add_argument("--enable-ner", action="store_true", help="启用自由文本 NER（需 models/bert4ner）")
     parser.add_argument("--keep-running", action="store_true", help="关掉应用窗口后服务继续在后台运行（默认关窗口即停）")
+    parser.add_argument("--tray", dest="tray", action="store_true", default=None, help="显示系统托盘图标（默认：打包 exe 开启、源码运行关闭）")
+    parser.add_argument("--no-tray", dest="tray", action="store_false", help="不显示系统托盘图标")
     parser.add_argument("--stop", action="store_true", help="停止正在运行的 FlowMask 实例后退出（桌面「停止」快捷方式用）")
     parser.add_argument("--self-check", action="store_true", help="打印/落盘一份运行环境自检报告后退出（排障用）")
     args = parser.parse_args(argv)
@@ -387,9 +503,11 @@ def main(argv: list[str] | None = None) -> int:
 
     app = create_app()
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False))
+    tray_enabled = _tray_enabled(args.tray)
+    tray_icon: object | None = None
 
     def _request_exit() -> None:
-        print("[FlowMask] 应用窗口已关闭，正在停止服务…", flush=True)
+        print("[FlowMask] 正在停止服务…", flush=True)
         server.should_exit = True
 
     def _open_when_ready() -> None:
@@ -405,10 +523,15 @@ def main(argv: list[str] | None = None) -> int:
             return
         opened_with, window_proc = _open_window(url)
         print(f"[FlowMask] 已用 {opened_with} 打开应用窗口：{url}", flush=True)
-        if window_proc is not None and not args.keep_running:
+        if window_proc is not None and not args.keep_running and not tray_enabled:
             outcome = _watch_window(window_proc, _request_exit)
             if outcome == "delegated":
                 print("[FlowMask] 窗口交给已有浏览器实例，无法跟踪关闭事件；请用「停止」快捷方式退出", flush=True)
+        elif tray_enabled:
+            print(
+                "[FlowMask] 关掉窗口后服务继续在系统托盘运行；要退出请右键托盘图标 →「退出 FlowMask」",
+                flush=True,
+            )
 
     threading.Thread(target=_open_when_ready, daemon=True).start()
 
@@ -417,13 +540,21 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  本机访问：{url}", flush=True)
     print(f"  内置单页：http://{host}:{port}/ui/", flush=True)
     print(f"  接口文档：http://{host}:{port}/docs", flush=True)
-    print("  关窗口即停服务（--keep-running 可保留后台）；按 Ctrl+C 也可退出", flush=True)
+    if tray_enabled:
+        print("  关窗口后服务驻留系统托盘；要退出请右键托盘图标 →「退出 FlowMask」（Ctrl+C 也可退出）", flush=True)
+    else:
+        print("  关窗口即停服务（--keep-running 可保留后台）；按 Ctrl+C 也可退出", flush=True)
     print("", flush=True)
 
     _write_pid_file(port)
+    if tray_enabled:
+        tray_icon = _start_tray(url, _request_exit)
     try:
         server.run()
     finally:
+        if tray_icon is not None:
+            with contextlib.suppress(Exception):
+                tray_icon.stop()
         _clear_pid_file()
     return 0
 
