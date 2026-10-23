@@ -59,7 +59,7 @@ scripts\stop_local.cmd                            # 停止全部
 ### 2.2 手动启动（分步调试用）
 
 ```powershell
-python -m pytest -o addopts="" -q    # 523 个用例（518 通过 + 5 跳过；4 个性能预算用例需 FLOWMASK_RUN_PERF=1）
+python -m pytest -o addopts="" -q    # 530 个用例（525 通过 + 5 跳过；4 个性能预算用例需 FLOWMASK_RUN_PERF=1）
 python -m bench --markdown-out ../docs/性能报告.md   # 性能基准（L1/端到端/L2；加 --l3-endpoint 测 L3）
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
 # 构建正式前端（可选，需 Node 18+；产物在 ../web/dist）
@@ -508,7 +508,7 @@ l3_training/         L3 指令微调：金标→指令样本、LoRA 训练、权
   l3_service/          L3 推理服务（mock / hf / instruct 后端 + /v1/judge”）
   samples/             自带示例抓包生成脚本与 demo-traffic.pcap
   eval/                评测集（351 条主集 + 200 条 NER 压力集）与评测说明
-  tests/               523 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、长文本性能、前端与脚本静态回归
+  tests/               530 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、长文本性能、前端与脚本静态回归、桌面打包配置（图标/托盘/安装包）
   pyproject.toml
   requirements.txt     运行依赖（固定版本）
   requirements-ml.txt  可选：L2/L3/NER/训练与导出
@@ -687,6 +687,31 @@ powershell -ExecutionPolicy Bypass -File scripts\create_shortcut.ps1 -Mode stop 
 
 已知边界：exe 只跑**主服务**；L2/L3/NER 的 torch/onnxruntime 推理仍以 Python 进程单独启动（`python -m l2_service`），
 以免把 CUDA/驱动版本耦合进 exe。打包用 PyInstaller（`flowmask.spec`），**不需要** Rust/Node 运行时。
+
+#### 图标、系统托盘与安装包（可选增强，更接近桌面应用）
+
+- **应用图标**：`assets/flowmask.ico`（16/24/32/48/64/128/256 七尺寸）+ `assets/flowmask-128.png`，
+  由 `scripts/make_icon.py`（Pillow）从同一套设计生成；`flowmask.spec` 的 `EXE(icon=..., version=assets/flowmask_version.txt)`
+  会把图标和 Windows 版本资源（FileVersion 0.1.0.0 / ProductName FlowMask）嵌进 exe。
+  网页端 favicon 用同一张图（`web/public/favicon.ico` → `/app/favicon.ico`）。
+  图标文件由测试盯着：`tests/test_assets.py` 校验 ICO 魔数与 favicon 一致，`tests/test_desktop.py` 校验版本资源与 `app.__version__` 对齐。
+- **系统托盘**（exe 双击版默认开启）：关窗口后服务继续驻留，右键托盘图标可「打开 FlowMask / 打开数据目录 / 退出 FlowMask」；
+  `--tray` 强制开、`--no-tray` 关闭。托盘依赖是可选的（`requirements-desktop.txt` 里的 `pystray` + `pillow`），
+  没装或当前会话无法创建托盘窗口时**自动降级**并打印「托盘未能显示（不影响主服务）：…」，不会影响 Web 服务本身。
+- **安装包**：`scripts\build_installer.ps1`（可加 `-SkipBuild` 复用已构建 exe）会先跑 `build_exe.ps1`，再用 Inno Setup
+  （`installer\FlowMask.iss`，当前用户级安装、无需管理员）编译 `dist_install\FlowMask-Setup-0.1.0.exe`，
+  并顺带打包便携版 `FlowMask-Portable-0.1.0.zip`。脚本会自动在 PATH 与 `%LOCALAPPDATA%\Programs\Inno Setup 6` 找 `ISCC.exe`，
+  找不到会提示 `winget install --id JRSoftware.InnoSetup -e` 后退出（exit 2）。
+  安装目录默认 `%LOCALAPPDATA%\Programs\FlowMask`，带开始菜单/可选桌面快捷方式、卸载入口和 `使用说明.txt`；
+  权重（`l2_models/`、`models/`）仍按「放在 exe 同级」的约定外置，安装包不含权重。
+  `dist_exe/`、`dist_install/` 都是可重建产物，已在 `.gitignore` 中忽略，不入库。
+
+```powershell
+# 只重打 exe（含图标/托盘）
+powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
+# 打安装包 + 便携 zip（复用刚构建的 exe）
+powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1 -SkipBuild
+```
 
 ### 12.7 一键演示（答辩 / 评审现场）
 
