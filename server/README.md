@@ -59,7 +59,7 @@ scripts\stop_local.cmd                            # 停止全部
 ### 2.2 手动启动（分步调试用）
 
 ```powershell
-python -m pytest -o addopts="" -q    # 530 个用例（525 通过 + 5 跳过；4 个性能预算用例需 FLOWMASK_RUN_PERF=1）
+python -m pytest -o addopts="" -q    # 531 个用例（526 通过 + 5 跳过；4 个性能预算用例需 FLOWMASK_RUN_PERF=1）
 python -m bench --markdown-out ../docs/性能报告.md   # 性能基准（L1/端到端/L2；加 --l3-endpoint 测 L3）
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
 # 构建正式前端（可选，需 Node 18+；产物在 ../web/dist）
@@ -508,7 +508,7 @@ l3_training/         L3 指令微调：金标→指令样本、LoRA 训练、权
   l3_service/          L3 推理服务（mock / hf / instruct 后端 + /v1/judge”）
   samples/             自带示例抓包生成脚本与 demo-traffic.pcap
   eval/                评测集（351 条主集 + 200 条 NER 压力集）与评测说明
-  tests/               530 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、长文本性能、前端与脚本静态回归、桌面打包配置（图标/托盘/安装包）
+  tests/               531 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、长文本性能、前端与脚本静态回归、桌面打包配置（图标/托盘/安装包）、网页端快捷方式
   pyproject.toml
   requirements.txt     运行依赖（固定版本）
   requirements-ml.txt  可选：L2/L3/NER/训练与导出
@@ -671,6 +671,18 @@ powershell -ExecutionPolicy Bypass -File scripts\create_shortcut.ps1 -Mode stop 
 再用 `start` 脱离控制台，所以黑框一闪即关；停止脚本内部是 `FlowMask.exe --stop`。
 这样每条链路都能在命令行里原样复现，排查时不用猜「双击到底执行了什么」。
 也可以不走快捷方式，直接双击 `dist_exe\FlowMask.exe`（它自己会挑端口、开窗口）。
+
+只想打开**网页端**（不需要 exe）时，用同一个脚本生成网页端入口：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\create_shortcut.ps1 -Mode web
+# → 桌面「FlowMask 网页端」
+```
+
+双击后由 `scripts\open_web.ps1` 负责：已在运行就直接打开 `http://127.0.0.1:8090/app/`；
+没在运行会**后台拉起服务**（`start_local.cmd -Port 8090 -NoBrowser`，隐藏窗口）再打开浏览器，
+启动超时或浏览器打不开会弹窗提示并提供可复制地址。`--NoStart` 只提示不动手，`--DryRun` 只打印将执行的步骤；
+过程日志写到 `server\logs\open_web.log`，排查时先看这里。
 
 停止有两条路，都不需要去找进程管理器：
 

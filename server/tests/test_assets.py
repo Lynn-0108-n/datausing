@@ -258,3 +258,19 @@ def test_icon_assets_are_bundled_and_used():
     index = _read(REPO_DIR / "web" / "index.html")
     assert 'rel="icon"' in index
     assert "/app/favicon.ico" in index
+
+
+def test_web_shortcut_mode_and_open_web_script():
+    """网页端快捷方式：create_shortcut.ps1 支持 -Mode web，open_web.ps1 负责探测与自动启动。"""
+    create = _read(SERVER_DIR / "scripts" / "create_shortcut.ps1")
+    assert '"web"' in create
+    assert "open_web.ps1" in create
+    assert "assets\\flowmask.ico" in create
+    assert "WindowStyle = 7" in create
+
+    open_web = _read(SERVER_DIR / "scripts" / "open_web.ps1")
+    assert "/api/v1/health" in open_web
+    assert "/app/" in open_web
+    assert "start_local.cmd" in open_web
+    assert "NoStart" in open_web
+    assert "DryRun" in open_web

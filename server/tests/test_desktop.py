@@ -233,7 +233,7 @@ def test_stop_shortcut_script_exists() -> None:
     stop_cmd = (scripts / "stop_flowmask.cmd").read_text(encoding="utf-8", errors="ignore")
     assert "--stop" in stop_cmd
     creator = (scripts / "create_shortcut.ps1").read_text(encoding="utf-8-sig")
-    assert "ValidateSet(\"start\", \"stop\")" in creator
+    assert "ValidateSet(\"start\", \"stop\", \"web\")" in creator
     assert "FlowMask 停止" in creator
 
 
