@@ -17,6 +17,7 @@ from .registry import (
 )
 from .sql_parser import parse_sql
 from .text import parse_text
+from .xlsx_parser import parse_xlsx
 
 __all__ = [
     "DOCUMENT_EXTENSIONS",
@@ -33,6 +34,7 @@ __all__ = [
     "parse_sql",
     "parse_text",
     "parse_text_input",
+    "parse_xlsx",
     "pdf_engine",
     "supported_formats",
 ]

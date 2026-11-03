@@ -26,9 +26,11 @@ from app.identify.masking import (
 from app.identify.pipeline import DetectOptions, DetectionPipeline, DocumentReport
 from app.identify.types import EntityType, Hit
 from app.parsers.base import Document, Segment
-from app.parsers.registry import parse_csv, parse_docx, parse_json, parse_sql
+from app.parsers.registry import parse_csv, parse_docx, parse_json, parse_sql, parse_xlsx
 from app.parsers.text import parse_text as parse_plain_text
 from app.tasks.document_export import EXPORT_FORMATS, build_masked_bytes
+
+from xlsx_fixtures import make_xlsx, number_cell, row, text_cell
 
 SECRET = "flowmask-doc-export-secret"
 PHONE = "13812345678"
@@ -284,6 +286,51 @@ def test_docx_export_is_parseable_and_clean() -> None:
     _assert_no_residual(joined, NAME, PHONE, ID_CARD, EMAIL)
 
 
+def test_xlsx_export_is_parseable_and_clean() -> None:
+    rows = row(
+        1,
+        text_cell("A1", "姓名"),
+        text_cell("B1", "手机号"),
+        text_cell("C1", "身份证"),
+        text_cell("D1", "邮箱"),
+    ) + row(2, text_cell("A2", NAME), number_cell("B2", PHONE), text_cell("C2", ID_CARD), text_cell("D2", EMAIL))
+    document = parse_xlsx(make_xlsx([("客户表", rows)]), source="客户表.xlsx")
+    report = _analyze(document)
+    content, media_type, ext = build_masked_bytes(document, report, strategy="block", fmt="auto", secret=SECRET)
+    assert ext == "xlsx"
+    assert media_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+        names = set(archive.namelist())
+        worksheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+    assert {
+        "[Content_Types].xml",
+        "_rels/.rels",
+        "xl/workbook.xml",
+        "xl/_rels/workbook.xml.rels",
+        "xl/worksheets/sheet1.xml",
+    } <= names
+    # 表头原文保留，敏感值零残留
+    assert "姓名" in worksheet and "手机号" in worksheet
+    _assert_no_residual(worksheet, PHONE, ID_CARD, EMAIL)
+    # 能被本仓解析器反解析，脱敏值仍落在原单元格
+    parsed = parse_xlsx(content, source="export.xlsx")
+    assert [segment.path for segment in parsed.segments] == ["客户表!A2", "客户表!B2", "客户表!C2", "客户表!D2"]
+    masked_by_hint = {segment.hint: segment.text for segment in parsed.segments}
+    assert masked_by_hint["手机号"] and masked_by_hint["手机号"] != PHONE
+    assert masked_by_hint["身份证"] and masked_by_hint["身份证"] != ID_CARD
+
+
+def test_xlsx_only_exports_xlsx_or_txt() -> None:
+    rows = row(1, text_cell("A1", "手机号")) + row(2, text_cell("A2", PHONE))
+    document = parse_xlsx(make_xlsx([("表1", rows)]), source="a.xlsx")
+    report = _analyze(document)
+    with pytest.raises(ValueError, match="Excel 仅支持导出 xlsx 或 txt"):
+        build_masked_bytes(document, report, strategy="partial", fmt="json", secret=SECRET)
+    content, media_type, ext = build_masked_bytes(document, report, strategy="partial", fmt="txt", secret=SECRET)
+    assert (media_type, ext) == ("text/plain;charset=utf-8", "txt")
+    _assert_no_residual(content.decode("utf-8"), PHONE)
+
+
 def test_encrypt_export_roundtrip_via_decrypt() -> None:
     document = parse_plain_text(f"手机：{PHONE}，邮箱：{EMAIL}", source="secret.txt")
     report = _analyze(document)
@@ -335,6 +382,13 @@ def test_auto_fmt_follows_document_type() -> None:
     sql_document = parse_sql("INSERT INTO t (phone) VALUES ('13812345678');", source="a.sql")
     sql_report = _analyze(sql_document)
     assert build_masked_bytes(sql_document, sql_report, strategy="partial", fmt="auto", secret=SECRET)[2] == "sql"
+
+    xlsx_document = parse_xlsx(
+        make_xlsx([("表1", row(1, text_cell("A1", "手机号")) + row(2, text_cell("A2", PHONE)))]),
+        source="a.xlsx",
+    )
+    xlsx_report = _analyze(xlsx_document)
+    assert build_masked_bytes(xlsx_document, xlsx_report, strategy="partial", fmt="auto", secret=SECRET)[2] == "xlsx"
 
 
 def test_pdf_only_exports_txt() -> None:

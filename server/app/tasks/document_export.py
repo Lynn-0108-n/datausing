@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 import zipfile
 from xml.sax.saxutils import escape
 
@@ -26,7 +27,7 @@ from ..identify.pipeline import DocumentReport
 from ..parsers.base import Document
 
 #: 允许显式指定的输出格式
-EXPORT_FORMATS = ("txt", "json", "csv", "sql", "docx")
+EXPORT_FORMATS = ("txt", "json", "csv", "sql", "docx", "xlsx")
 
 #: ``fmt="auto"`` 时按文档形态选默认输出格式
 DEFAULT_FORMATS: dict[str, str] = {
@@ -35,6 +36,7 @@ DEFAULT_FORMATS: dict[str, str] = {
     "csv": "csv",
     "sql": "sql",
     "docx": "docx",
+    "xlsx": "xlsx",
     "pdf": "txt",  # PDF 只能导出文本
 }
 
@@ -45,6 +47,7 @@ _MEDIA_TYPES: dict[str, tuple[str, str]] = {
     "csv": ("text/csv;charset=utf-8", "csv"),
     "sql": ("application/sql;charset=utf-8", "sql"),
     "docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
+    "xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"),
 }
 
 
@@ -57,6 +60,8 @@ def _resolve_fmt(document: Document, fmt: str) -> str:
         raise ValueError("不支持的输出格式")
     if document.content_type == "pdf" and key != "txt":
         raise ValueError("PDF 仅支持导出 txt")
+    if document.content_type == "xlsx" and key not in ("xlsx", "txt"):
+        raise ValueError("Excel 仅支持导出 xlsx 或 txt")
     return key
 
 
@@ -308,12 +313,137 @@ def _build_docx(document: Document, _report: DocumentReport, _strategy: str, _se
     return buffer.getvalue()
 
 
+# ---- xlsx ------------------------------------------------------------------
+
+_XLSX_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_XLSX_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_XLSX_PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_XLSX_NUMERIC = re.compile(r"^-?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$")
+
+_XLSX_ROOT_RELS_XML = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    f'<Relationships xmlns="{_XLSX_PKG_REL_NS}">'
+    f'<Relationship Id="rId1" Type="{_XLSX_REL_NS}/officeDocument" Target="xl/workbook.xml"/>'
+    "</Relationships>"
+)
+
+
+def _xlsx_column_letters(position: int) -> str:
+    """列序号 → 列字母（1 → A、27 → AA）。"""
+    letters = ""
+    while position > 0:
+        position, remainder = divmod(position - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
+def _xlsx_content_types(sheet_count: int) -> str:
+    """``[Content_Types].xml``：工作簿主部件 + 每张工作表各一条 Override。"""
+    overrides = "".join(
+        f'<Override PartName="/xl/worksheets/sheet{index}.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        for index in range(1, sheet_count + 1)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        + overrides
+        + "</Types>"
+    )
+
+
+def _xlsx_workbook_xml(names: list[str]) -> str:
+    """``xl/workbook.xml``：按原顺序保留工作表名，关系 id 与 rels 文件一一对应。"""
+    sheets = "".join(
+        f'<sheet name="{escape(name, {chr(34): "&quot;"})}" sheetId="{index}" r:id="rId{index}"/>'
+        for index, name in enumerate(names, start=1)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        f'<workbook xmlns="{_XLSX_NS}" xmlns:r="{_XLSX_REL_NS}"><sheets>{sheets}</sheets></workbook>'
+    )
+
+
+def _xlsx_workbook_rels(sheet_count: int) -> str:
+    """``xl/_rels/workbook.xml.rels``：关系 id → 工作表文件。"""
+    rels = "".join(
+        f'<Relationship Id="rId{index}" Type="{_XLSX_REL_NS}/worksheet" '
+        f'Target="worksheets/sheet{index}.xml"/>'
+        for index in range(1, sheet_count + 1)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        f'<Relationships xmlns="{_XLSX_PKG_REL_NS}">{rels}</Relationships>'
+    )
+
+
+def _xlsx_cell_xml(reference: str, kind: str, value: str) -> str:
+    """单个单元格：原数值格仍写数字，其余（文本、被掩码的数值、布尔/日期）写内联文本。"""
+    if kind == "n" and _XLSX_NUMERIC.match(value):
+        return f'<c r="{reference}"><v>{value}</v></c>'
+    return f'<c r="{reference}" t="inlineStr"><is><t xml:space="preserve">{escape(value)}</t></is></c>'
+
+
+def _xlsx_sheet_xml(
+    rows: list[list[tuple[str, str, object]]],
+    segments: list,
+    masked: dict[str, str],
+) -> str:
+    """一张工作表的 ``sheetData``：按解析时记录的行列结构逐格重建。"""
+    rows_xml: list[str] = []
+    for row_number, cells in rows:
+        cells_xml: list[str] = []
+        for position, (reference, kind, payload) in enumerate(cells, start=1):
+            if isinstance(payload, int):
+                segment = segments[payload]
+                value = masked.get(segment.path, segment.text)
+            else:
+                value = str(payload)
+            cells_xml.append(
+                _xlsx_cell_xml(reference or f"{_xlsx_column_letters(position)}{row_number}", kind, value)
+            )
+        rows_xml.append(f'<row r="{row_number}">' + "".join(cells_xml) + "</row>")
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        f'<worksheet xmlns="{_XLSX_NS}"><sheetData>' + "".join(rows_xml) + "</sheetData></worksheet>"
+    )
+
+
+def _build_xlsx(document: Document, _report: DocumentReport, _strategy: str, _secret: str, masked: dict[str, str]) -> bytes:
+    """XLSX：零依赖手写 zip（Content_Types / rels / workbook / worksheets），可被本仓解析器反解。
+
+    只重建单元格文本：样式、公式、合并单元格、隐藏行列不保留（"尽力重建"）。
+    """
+    meta = document.meta.get("xlsx") or {}
+    sheets = list(meta.get("sheets") or [])  # type: ignore[union-attr]
+    if not sheets:
+        raise ValueError("Excel 原文结构不可用")
+    names = [str(sheet.get("name", "")) for sheet in sheets]
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", _xlsx_content_types(len(sheets)))
+        archive.writestr("_rels/.rels", _XLSX_ROOT_RELS_XML)
+        archive.writestr("xl/workbook.xml", _xlsx_workbook_xml(names))
+        archive.writestr("xl/_rels/workbook.xml.rels", _xlsx_workbook_rels(len(sheets)))
+        for index, sheet in enumerate(sheets, start=1):
+            archive.writestr(
+                f"xl/worksheets/sheet{index}.xml",
+                _xlsx_sheet_xml(list(sheet.get("rows") or []), document.segments, masked),  # type: ignore[union-attr]
+            )
+    return buffer.getvalue()
+
+
 _BUILDERS = {
     "txt": _build_txt,
     "json": _build_json,
     "csv": _build_csv,
     "sql": _build_sql,
     "docx": _build_docx,
+    "xlsx": _build_xlsx,
 }
 
 
@@ -328,7 +458,7 @@ def build_masked_bytes(
     """按策略把文档重建成脱敏文件，返回 ``(内容, Content-Type, 扩展名)``。
 
     - ``strategy``：六种策略之一（未知值回退 ``partial``；``encrypt`` 需要非空密钥）；
-    - ``fmt``：``auto`` 跟随文档形态，或显式 ``txt/json/csv/sql/docx``；
+    - ``fmt``：``auto`` 跟随文档形态，或显式 ``txt/json/csv/sql/docx/xlsx``；
     - ``secret``：hash / pseudonym 的盐与 encrypt 的密钥（来自 ``settings.export_secret``）。
 
     只替换 ``all_findings`` 里的命中片段（不受 ``min_level`` 影响），保证导出内容

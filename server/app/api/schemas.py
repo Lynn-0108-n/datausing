@@ -518,14 +518,16 @@ class DetectExportRequest(BaseModel):
 
     text: str = Field(min_length=1, max_length=200_000, description="原文（文本/JSON/CSV/SQL 序列化后的字符串）")
     content_type: str = Field(
-        default="text", description="原文形态：text / json / csv / sql / docx（docx 仅上传入口使用）"
+        default="text",
+        description="原文形态：text / json / csv / sql / docx / xlsx（docx、xlsx 仅上传入口使用）",
     )
     strategy: str = Field(
         default="partial",
         description="脱敏策略：block / partial / hash / generalize / pseudonym / encrypt",
     )
     fmt: str = Field(
-        default="auto", description="输出格式：auto（跟随 content_type）/ txt / json / csv / sql / docx"
+        default="auto",
+        description="输出格式：auto（跟随 content_type）/ txt / json / csv / sql / docx / xlsx",
     )
     enable_l2: bool = False
     enable_l3: bool = False

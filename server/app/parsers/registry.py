@@ -19,6 +19,7 @@ from .json_parser import parse_json
 from .pdf_parser import parse_pdf, pdf_engine
 from .sql_parser import parse_sql
 from .text import parse_text
+from .xlsx_parser import parse_xlsx
 
 #: 解析器契约：``handler(filename, data) -> Document``，直接拿原始字节自行解码。
 FormatHandler = Callable[[str, bytes], Document]
@@ -103,6 +104,10 @@ def _pdf_handler(filename: str, data: bytes) -> Document:
     return parse_pdf(data, source=filename)
 
 
+def _xlsx_handler(filename: str, data: bytes) -> Document:
+    return parse_xlsx(data, source=filename)
+
+
 def _image_handler(filename: str, data: bytes) -> Document:
     """图片交给 OCR 解析器；未启用/未安装时 parse_image 会抛 ParseError 提示装依赖。"""
     return parse_image(data, name=filename)
@@ -115,6 +120,7 @@ def _register_builtin_formats() -> None:
     register_format((".csv", ".tsv"), _text_handler(parse_csv), content_type="csv")
     register_format((".sql",), _text_handler(parse_sql), content_type="sql")
     register_format((".docx",), _docx_handler, content_type="docx", binary=True)
+    register_format((".xlsx",), _xlsx_handler, content_type="xlsx", binary=True)
     register_format((".pdf",), _pdf_handler, content_type="pdf", binary=True)
     # 图片单独登记（见 IMAGE_EXTENSIONS 注释：不参与 format_specs 的插件清单）
     for suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
@@ -162,7 +168,7 @@ def supported_formats() -> dict[str, object]:
     目录或写密钥，也让该函数可以在没有临时环境的测试里安全调用。
 
     OCR 未启用（依赖缺失或 FLOWMASK_OCR_ENABLED 未开）时 ``supported`` 保持原有
-    9 个文本/文档扩展名不变，图片扩展名只在真正可 OCR 后才出现：前端据此决定是否
+    10 个文本/文档扩展名不变，图片扩展名只在真正可 OCR 后才出现：前端据此决定是否
     展示「上传图片」入口，而不需要理解配置项。
     """
     engine = pdf_engine()
@@ -180,6 +186,7 @@ def supported_formats() -> dict[str, object]:
     return {
         "supported": supported,
         "docx": True,
+        "xlsx": True,
         "pdf": engine is not None,
         "pdf_engine": engine,
         "image": ocr_on,

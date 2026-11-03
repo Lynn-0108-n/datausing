@@ -53,7 +53,7 @@ def test_builtin_operators_registered() -> None:
 def test_builtin_parsers_match_format_registry() -> None:
     registry = _builtin_registry()
     parser_names = registry.names("parser")
-    assert parser_names == ["csv", "docx", "json", "pdf", "sql", "text"]
+    assert parser_names == ["csv", "docx", "json", "pdf", "sql", "text", "xlsx"]
     supported = parsers.supported_extensions()
     for spec in registry.specs("parser"):
         extensions = list(spec.meta["extensions"])

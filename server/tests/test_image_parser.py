@@ -146,8 +146,8 @@ def test_parse_image_without_text_returns_empty_document(ocr_env, monkeypatch) -
 # ---------------------------------------------------------------------------
 
 
-def test_supported_formats_keeps_nine_extensions_without_ocr(monkeypatch) -> None:
-    """OCR 依赖不可用时：supported 必须与改动前完全一致（原 9 个扩展名）。
+def test_supported_formats_keeps_ten_extensions_without_ocr(monkeypatch) -> None:
+    """OCR 依赖不可用时：supported 必须包含全部文本/文档扩展名（现 10 个）。
 
     supported_formats() 不读 get_settings()，这里直接用假 zero 引擎探测结果验证。
     """
@@ -162,6 +162,7 @@ def test_supported_formats_keeps_nine_extensions_without_ocr(monkeypatch) -> Non
         ".tsv",
         ".sql",
         ".docx",
+        ".xlsx",
         ".pdf",
     }
     assert formats["image"] is False
@@ -197,9 +198,9 @@ def test_supported_formats_hides_images_until_enabled(monkeypatch) -> None:
 
 
 def test_image_formats_not_listed_as_text_parsers() -> None:
-    """插件页的解析器清单保持原六类：图片是可选能力，不混进文本解析器列表。"""
+    """插件页的解析器清单保持内置解析器：图片是可选能力，不混进解析器列表。"""
     names = [str(spec["name"]) for spec in registry.format_specs()]
-    assert names == ["csv", "docx", "json", "pdf", "sql", "text"]
+    assert names == ["csv", "docx", "json", "pdf", "sql", "text", "xlsx"]
 
 
 def test_registry_dispatches_image_extensions_to_ocr(tmp_env) -> None:

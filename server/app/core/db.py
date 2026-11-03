@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   finished_at    TEXT,
   status         TEXT NOT NULL,           -- pending / running / done / failed
   source         TEXT NOT NULL,           -- 文件名（上传）或 text（粘贴）
-  content_type   TEXT NOT NULL,           -- json / csv / sql / text / docx / pdf
+  content_type   TEXT NOT NULL,           -- json / csv / sql / text / docx / pdf / xlsx
   options        TEXT NOT NULL,           -- JSON：级别、算子开关、是否启用 L2/L3
   total_segments INTEGER NOT NULL DEFAULT 0,
   total_findings INTEGER NOT NULL DEFAULT 0,

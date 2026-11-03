@@ -185,6 +185,7 @@ _PARSER_DESCRIPTIONS = {
     "csv": "CSV/TSV：按单元格检测，表头作为上下文",
     "sql": "SQL：INSERT/UPDATE 字面量检测",
     "docx": "Word（zip+XML 自研解析，免 python-docx）",
+    "xlsx": "Excel（zip+XML 自研解析，免 openpyxl）",
     "pdf": "PDF（可选依赖 pdfplumber，缺依赖时 /formats 提示）",
 }
 

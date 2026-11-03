@@ -166,6 +166,50 @@ def test_detect_unsupported_upload_is_415(client) -> None:
     assert response.status_code == 415
 
 
+def test_detect_xlsx_upload(client) -> None:
+    from xlsx_fixtures import make_xlsx, row, text_cell
+
+    data = make_xlsx([("客户表", row(1, text_cell("A1", "手机号")) + row(2, text_cell("A2", PHONE)))])
+    response = client.post(
+        "/api/v1/detect/file",
+        files={
+            "file": (
+                "客户表.xlsx",
+                data,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["content_type"] == "xlsx"
+    assert body["findings"]
+    assert body["masked_document"]["content_type"] == "xlsx"
+    assert body["masked_document"]["segments"][0]["path"] == "客户表!A2"
+    # 响应里不能出现原文手机号（只允许脱敏副本）
+    assert PHONE not in json.dumps(body, ensure_ascii=False)
+
+
+def test_detect_xlsx_export_download(client) -> None:
+    from app.parsers import parse_xlsx
+    from xlsx_fixtures import make_xlsx, row, text_cell
+
+    data = make_xlsx([("客户表", row(1, text_cell("A1", "手机号")) + row(2, text_cell("A2", PHONE)))])
+    response = client.post(
+        "/api/v1/detect/file/export",
+        files={"file": ("客户表.xlsx", data, "application/octet-stream")},
+        data={"strategy": "partial", "fmt": "auto"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert "attachment" in response.headers["content-disposition"]
+    parsed = parse_xlsx(response.content, source="masked.xlsx")
+    assert [segment.path for segment in parsed.segments] == ["客户表!A2"]
+    assert PHONE not in parsed.segments[0].text
+
+
 def test_task_flow_findings_export_and_stats(client) -> None:
     files = {"file": ("a.txt", f"姓名：张三\n联系电话 {PHONE}\n".encode(), "text/plain")}
     task_id = client.post("/api/v1/tasks", files=files).json()["task_id"]

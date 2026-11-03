@@ -95,7 +95,7 @@ def detect_text(
     return _to_out(pipeline.analyze_document(document, options), document)
 
 
-@router.post("/detect/file", response_model=DetectOut, summary="即时检测：上传文件（txt/json/csv/sql）")
+@router.post("/detect/file", response_model=DetectOut, summary="即时检测：上传文件（txt/json/csv/sql/docx/pdf/xlsx）")
 async def detect_file(
     file: UploadFile = File(..., description="待检测文件"),
     enable_l2: bool = False,
@@ -262,7 +262,7 @@ def detect_decrypt(
 async def detect_file_export(
     file: UploadFile = File(..., description="待脱敏导出的文件"),
     strategy: str = Form("partial", description="脱敏策略：block / partial / hash / generalize / pseudonym / encrypt"),
-    fmt: str = Form("auto", description="输出格式：auto / txt / json / csv / sql / docx"),
+    fmt: str = Form("auto", description="输出格式：auto / txt / json / csv / sql / docx / xlsx"),
     enable_l2: bool = Form(False),
     enable_l3: bool = Form(False),
     enable_ner: bool | None = Form(None),

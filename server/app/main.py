@@ -56,7 +56,7 @@ FlowMask：网络与文档流量的分级脱敏与审计溯源系统（数据安
 
 - **自带控制台**：启动后打开 `/ui`（左右对照 + 任务/审计 + 统计看板 + 规则启停），无需前端构建
 
-- **输入**：粘贴文本 / 上传 txt·json·csv·sql·docx·pdf（图片 OCR 需可选依赖）/ pcap 离线检测（另一 CLI）
+- **输入**：粘贴文本 / 上传 txt·json·csv·sql·docx·pdf·xlsx（图片 OCR 需可选依赖）/ pcap 离线检测（另一 CLI）
 - **识别**：L1 规则（12 条 + 校验位）→ L2 BERT 语义（可选）→ L3 本地大模型复核（可选）
 - **输出**：四级敏感度 + 脱敏副本 + 可复算的置信度向量 + HMAC 哈希链审计日志
 - **增强**：6 种脱敏策略（block/partial/hash/generalize/pseudonym/encrypt）与脱敏文件导出；
