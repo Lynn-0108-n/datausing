@@ -6,8 +6,8 @@
 
 | 入口 | 技术栈 | 状态 | 一句话 |
 | --- | --- | --- | --- |
-| `server/`（v2 主链路） | Python 3.12 · FastAPI · SQLite | ✅ 框架完成、352 个测试（351 通过 + 1 跳过；含 pcap 导入、批量检测、实时旁路、浅/深色主题（偏好可按用户存服务端）、L2/L3 真模型联调、性能基准、自由文本 NER 开关、隐私增强导出） | 上传/粘贴（txt/json/csv/sql/docx/pdf）→ 分级脱敏 → 审计链；`http://127.0.0.1:8090/app/` 正式前端、`/ui/` 零依赖单页 |
-| `web/`（正式前端） | Vue3 · Element Plus · ECharts · Vite | ✅ 5 个页面 | 即时检测·左右对照 / 任务与审计链 / 统计看板 / 识别规则 / 动态脱敏；构建产物挂在服务端 `/app` |
+| `server/`（v2 主链路） | Python 3.12 · FastAPI · SQLite | ✅ 框架完成、621 个测试（616 通过 + 5 跳过；含 pcap 导入、批量检测、实时旁路、浅/深色主题（偏好可按用户存服务端）、L2/L3 真模型联调、性能基准、自由文本 NER 开关、隐私增强导出、策略化文件导出与可逆加密、场景模板、本地 AI 助手、可选图片 OCR） | 上传/粘贴（txt/json/csv/sql/docx/pdf，可选图片 OCR）→ 分级脱敏 → 审计链；`http://127.0.0.1:8090/app/` 正式前端、`/ui/` 零依赖单页 |
+| `web/`（正式前端） | Vue3 · Element Plus · ECharts · Vite | ✅ 8 个页面 | 即时检测·左右对照 / 批量检测 / 流量导入·实时旁路 / 任务与审计链 / 统计看板 / 识别规则 / 动态脱敏 / 设置；构建产物挂在服务端 `/app` |
 | `cmd/flowmask` + `cmd/netmon`（网络扩展） | Go 1.25 · 纯 Go 抓包 | ✅ pcap → findings → API 可查 | 旁路 pcap/网卡 → 敏感数据识别 → `/api/v1/dlp/*` |
 
 ```text
@@ -44,10 +44,14 @@ go run ./cmd/genpcaps && go run ./cmd/flowmask -db data/flowmask.db
 | 自定义规则 | 增删启停 + 正则可校验，库内持久化并即时生效 | ✅ |
 | 差分隐私 / l-多样性 | Laplace 噪声、数值泛化、l-多样性检查 + **隐私增强导出**（`/tasks/{id}/export/privacy`：分级/类别计数加噪 + l-多样性报告，前端 `ε`/`l` 可调） | ✅ |
 | 单页可视化 | `GET /ui/`：上传/粘贴 → 左右对照 + 分级统计，零前端依赖 | ✅ |
-| 正式前端（Vue3 + Element Plus + ECharts） | `web/`：6 个页面（即时检测·左右对照 / 流量导入·pcap / 任务与审计链 / 统计看板 / 识别规则 / 动态脱敏），Vite 构建后挂 `/app`；未构建自动回落 `/ui/` | ✅ |
+| 正式前端（Vue3 + Element Plus + ECharts） | `web/`：8 个页面（即时检测·左右对照 / 批量检测 / 流量导入·pcap / 任务与审计链 / 统计看板 / 识别规则 / 动态脱敏 / 设置），Vite 构建后挂 `/app`；未构建自动回落 `/ui/` | ✅ |
 | 流量导入（服务端 pcap） | 上传 pcap/pcapng → TCP 重组 + HTTP 正文提取 → 复用同一套分级/脱敏/任务/审计；`GET /traffic/sample` 自带示例；前端「流量导入 · pcap」页面一键跑示例（`?demo=1`） | ✅ |
 | 实时旁路（跟随抓包文件） | 持续跟随 dumpcap/Wireshark/自研采集器写出的抓包文件（**pcap / pcapng 都支持**），按窗口把新正文汇总成检测任务（结果进任务页/看板/审计链）；`/traffic/live*` + 前端面板 + `samples/simulate_live_traffic.py` 演示脚本 | ✅ |
 | 动态脱敏视图（授权切换） | `POST /api/v1/dynamic/render` + `/dynamic/policy`：未授权只给脱敏副本、授权返回原文并写审计链；内置页面「动态脱敏」页签可直接演示 | ✅ |
+| 脱敏策略与真脱敏文件导出 | 6 种策略（全屏蔽 / 部分隐藏 / 确定性加盐哈希 / 泛化 / 伪名 / 可逆加密）：`GET /mask-strategies` 查清单；`POST /detect/export`（文本/JSON/CSV/SQL → 同格式文件）、`POST /detect/file/export`（docx→docx、pdf→txt）、`POST /detect/decrypt`（还原 `enc:` 片段）——同一请求内用内存原文重建，原文不落库 | ✅ |
+| 使用场景模板（7 个） | `GET /scenarios`：医院→科研 / 金融风控 / 教学·学生数据 / 安全审计留痕 / 对外发布演示 / 科研分析 / 演示；一次给出策略 + 强制脱敏级别 + L2/L3/NER 开关与留存说明 | ✅ |
+| 本地 AI 助手（规则 + 可选本机模型） | `POST /assistant/suggest`（按场景/字段名/计数推荐方案）、`POST /assistant/advise`（聚合数字做风险研判）、`GET /assistant/health|models`；默认 `rules` 零模型，`FLOWMASK_ASSISTANT_MODE=ollama` 接本机模型，失败自动降级；**输入只含字段名与计数，不传敏感值** | ✅ |
+| 图片 OCR（可选依赖） | `requirements-ocr.txt`（rapidocr-onnxruntime + pillow）+ `FLOWMASK_OCR_ENABLED=1`：`/detect/file` 接收 png/jpg/jpeg/bmp/webp，OCR 出文字后复用同一套识别/脱敏/导出；未启用时给出安装提示，不返回 500 | ✅ |
 | 评测集与指标 | 自建标注集 **351 条**（策展 75 + 生成 225 + 稀有类别补样 51，与训练数据 0 重叠）+ 200 条公开语料压力集：L1 only 准确率 94.3% → 接 L2 真模型后 **100.0%**、安全误报率 **20.8%→0.0%**、高危漏检率 0.0%；自由文本压力集纯 L1 0.0% → 52.5%（自由文本规则）→ 61.0%（+地名库）→ 开 NER 90.0%，`--compare-l2 --l2-endpoint` 一键复跑 | ✅ |
 | L3 训练侧（LoRA 指令微调） | `server/l3_training/`：351 条金标 → 指令样本，LoRA 微调 Qwen2.5-1.5B；裁判单任务准确率 60.0% → **76.2%**，合并后直接接 `l3_service` | ✅ |
 | L3 训练侧（LoRA 指令微调） | `server/l3_training/`：351 条金标 → 指令样本，LoRA 微调 Qwen2.5-1.5B；裁判单任务准确率 60.0% → **76.2%**，合并后直接接 `l3_service` | ✅ |

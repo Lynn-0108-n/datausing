@@ -28,6 +28,10 @@
 | 批量检测（多文件） | ✅ | `POST /tasks/batch` 一次最多 20 个文件，一个文件一个任务；单个坏文件只在结果里标错，不影响同批其它文件 |
 | 性能基准 | ✅ | `server/bench.py` 本机实测：L1 **0.022 ms**/条（≈4.4 万条每秒）、端到端 `/detect` **2.18 ms**（≈459 请求/秒）、L2 int8 单条 7.4→4.1 ms、L3 1.5B **1.16 s**/条；报告 `docs/性能报告.md` 可一条命令复跑 |
 | 动态脱敏视图（授权切换） | ✅ | `POST /api/v1/dynamic/render`：未授权返回脱敏副本、授权返回原文并写审计链；`GET /dynamic/policy` 给出四级策略表；内置页面「动态脱敏」页签可直接演示 |
+| 脱敏策略与文件导出 | ✅ | 6 种策略（block/partial/hash/generalize/pseudonym/encrypt）：`GET /mask-strategies`、`POST /detect/export`（text/json/csv/sql）、`POST /detect/file/export`（docx→docx、pdf→txt）、`POST /detect/decrypt`；哈希/伪名确定性加盐，加密用 HMAC-SHA256 计数器流，密钥 `FLOWMASK_EXPORT_SECRET`（默认自动生成落 `export_secret.key`） |
+| 使用场景模板 | ✅ | `GET /scenarios`：7 个模板（医院→科研 / 金融风控 / 教学·学生数据 / 安全审计留痕 / 对外发布演示 / 科研分析 / 演示），一次给出策略 + 强制脱敏级别 + L2/L3/NER 开关与留存说明 |
+| 本地 AI 助手 | ✅ | `/assistant/health|models|suggest|advise`：默认 `rules` 纯本地规则、零模型；`FLOWMASK_ASSISTANT_MODE=ollama` 接本机模型，失败自动降级且接口仍 200；输入只含字段名/计数，不传敏感值 |
+| 图片 OCR（可选） | ✅ | `requirements-ocr.txt`（rapidocr-onnxruntime + pillow）+ `FLOWMASK_OCR_ENABLED=1`；`/detect/file` 接收 png/jpg/jpeg/bmp/webp 并 OCR 取文字；未启用时 `/formats` 给提示、解析返回 422 固定文案 |
 | L2 训练侧（RoBERTa 多标签） | ✅ | `l2_training/`：11 标签（10 敏感 + benign）、自举数据（默认 800 条，含 30% 困难负例）、弱标注、数据体检、微调 + ONNX 导出；本机真模型 macro-F1 **0.9844**、benign F1 **0.954** |
 | L3 训练侧（LoRA 指令微调） | ✅ | `l3_training/`：351 条评测集金标 → 指令样本（级别 + 类别 + 模板理由），LoRA 微调 Qwen2.5-1.5B；裁判单任务准确率 **60.0% → 76.2%**（80 条分层样本），合并成完整权重后 `FLOWMASK_L3_MODE=instruct` 直接加载 |
 
@@ -59,7 +63,7 @@ scripts\stop_local.cmd                            # 停止全部
 ### 2.2 手动启动（分步调试用）
 
 ```powershell
-python -m pytest -o addopts="" -q    # 531 个用例（526 通过 + 5 跳过；4 个性能预算用例需 FLOWMASK_RUN_PERF=1）
+python -m pytest -o addopts="" -q    # 621 个用例（616 通过 + 5 跳过；4 个性能预算用例需 FLOWMASK_RUN_PERF=1）
 python -m bench --markdown-out ../docs/性能报告.md   # 性能基准（L1/端到端/L2；加 --l3-endpoint 测 L3）
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
 # 构建正式前端（可选，需 Node 18+；产物在 ../web/dist）
@@ -345,6 +349,14 @@ python -m app.evaluate     # 默认 L1 only，几秒钟出结果
 | GET | `/health` | 健康检查（版本、时间、L2/L3 是否启用） |
 | POST | `/detect` | 即时检测文本（不落库） |
 | POST | `/detect/file` | 即时检测上传文件（multipart） |
+| GET | `/mask-strategies` | 6 种脱敏策略清单、说明与示例（前端策略下拉用） |
+| POST | `/detect/export` | 即时脱敏导出：`{text, content_type: text\|json\|csv\|sql, strategy, fmt?}` → 直接返回脱敏文件字节 |
+| POST | `/detect/file/export` | 上传文件即时导出（docx→docx、pdf→txt、csv/json/sql→同格式） |
+| POST | `/detect/decrypt` | 还原 `enc:` 加密片段（`{ciphertext}`，服务端 `FLOWMASK_EXPORT_SECRET`） |
+| GET | `/scenarios` | 使用场景模板（7 个；检测页「使用场景」与 AI 推荐共用） |
+| GET | `/assistant/health` / `/assistant/models` | 本地 AI 助手状态 / 本机模型列表（ollama） |
+| POST | `/assistant/suggest` | 推荐脱敏方案（只传场景/字段名/计数/用途说明，不传敏感值） |
+| POST | `/assistant/advise` | 按聚合统计做风险研判（看板用） |
 | GET | `/formats` | 支持的格式、已接入/待接入、各格式是否可用 |
 | GET | `/traffic/formats` | 流量导入支持的格式与限制（pcap/pcapng、上传上限） |
 | POST | `/traffic/import` | 上传 pcap：解析 HTTP 正文并创建检测任务（201 + 任务 ID 与解析统计） |
@@ -463,6 +475,13 @@ dumpcap -i 1 -w data/live.pcapng -b filesize:10240   # pcapng 同样是支持的
 | `FLOWMASK_DISABLE_DECODE` | 空（开启） | 设为 1 关闭 base64 / 百分号编码的载荷解码复核 |
 | `FLOWMASK_ALERT_MIN_LEVEL` | `L1` | 告警阈值：级别 ≥ 该值才进告警队列（`L3` 只看高危） |
 | `FLOWMASK_PLUGINS` | 空 | 第三方插件入口，逗号分隔的 `module:register`（缺省 register） |
+| `FLOWMASK_EXPORT_SECRET` | 空（自动生成） | 脱敏导出密钥（哈希盐/伪名/可逆加密）；留空首次启动生成并写 `<DATA_DIR>/export_secret.key`，换机还原需带同文件 |
+| `FLOWMASK_OCR_ENABLED` | `0` | 设为 1 启用图片 OCR（需先 `pip install -r requirements-ocr.txt`） |
+| `FLOWMASK_OCR_MAX_SIDE` | `1600` | 参与 OCR 的图片长边上限（像素），过大先等比缩放 |
+| `FLOWMASK_ASSISTANT_ENABLED` | `1` | 本地 AI 助手总开关（`rules` 模式不需模型） |
+| `FLOWMASK_ASSISTANT_MODE` | `rules` | `rules` 零模型 / `ollama` 接本机模型（失败自动降级 rules） |
+| `FLOWMASK_ASSISTANT_ENDPOINT` / `FLOWMASK_ASSISTANT_MODEL` | `http://127.0.0.1:11434/api/generate` / `qwen2.5:1.5b` | ollama 端点与模型名 |
+| `FLOWMASK_ASSISTANT_TIMEOUT_S` | `5.0` | 助手调用本机模型的超时（秒），超时降级 rules |
 
 ## 9. 代码结构
 
@@ -471,16 +490,18 @@ server/
   app/
     main.py            FastAPI 入口（建库 → 规则启停 → 插件加载 → 挂路由）
     plugins.py         插件注册表：engine/operator/parser 扩展点（内置 + FLOWMASK_PLUGINS）
+    scenarios.py       使用场景模板（7 个；/scenarios 与 AI 推荐的兜底基线）
+    assistant.py       本地 AI 助手（rules / ollama 双模式，只吃字段名与计数）
     core/
       config.py        Settings（环境变量，frozen dataclass + lru_cache）
       db.py            sqlite3 封装：tasks/findings/alerts/audit_log/rules/user_prefs 六张表 + 写锁 + WAL
-    parsers/           输入分段：text/json/csv/sql/docx/pdf + registry 统一入口（PDF 依赖可选 pdfplumber）
+    parsers/           输入分段：text/json/csv/sql/docx/pdf + image（OCR，可选）+ registry 统一入口（PDF 依赖可选 pdfplumber）
     webui/
       index.html       自带单页界面：上传/粘贴 → 左原文高亮 / 右脱敏副本（无需前端工具链）
     identify/
       rules.py         L1 规则表（含校验算法、可启停）
       scoring.py       评分公式与阈值
-      masking.py       四级脱敏模板
+      masking.py       四级脱敏模板 + 6 种导出策略（block/partial/hash/generalize/pseudonym/encrypt）
       types.py         Level/EntityType/Hit/Result 等基础类型
       l2.py            BERT 语义识别客户端（HTTP 契约 + 降级）
       l3.py            L3 客户端：调 `l3_service`（http）或直连 Ollama（ollama）
@@ -489,12 +510,13 @@ server/
     tasks/
       service.py       后台任务执行、findings 落库、逐条写审计
       export.py        jsonl/json/csv/sql 导出
+      document_export.py  按脱敏策略重建真实文件（txt/json/csv/sql/docx；pdf→txt）
     audit/
       chain.py         HMAC 哈希链：追加、查询、校验
     api/
       deps.py          鉴权、操作人、流水线单例
       schemas.py       请求/响应模型
-      routes_*.py      health/detect/tasks/findings/stats/rules/audit/dynamic/traffic/preferences
+      routes_*.py      health/detect/tasks/findings/stats/rules/audit/dynamic/traffic/preferences/alerts/assistant
     traffic/
       pcap.py          pcap/pcapng 解析、write_pcap
       frames.py        以太网/IP/TCP/UDP → Frame（载荷定位）
