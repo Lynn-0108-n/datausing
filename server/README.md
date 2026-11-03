@@ -750,8 +750,10 @@ powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1 -SkipBuild
 ### 12.7 一键演示（答辩 / 评审现场）
 
 `server/scripts/demo.ps1`（Windows）与 `demo.sh`（Linux/macOS）只调用 HTTP 接口、不依赖 Python 依赖，
-按「健康检查 → 即时检测 → 任务 + 审计 → pcap 流量 → 批量检测 → 动态脱敏 → 隐私增强导出 → 审计校验 → 看板」
-的顺序跑一遍，逐项打印 `[OK]/[FAIL]`，末尾给出退出码（0 = 全通过）。
+按「健康检查 → 即时检测 → 任务 + 审计 → pcap 流量 → 批量检测 → 文件检测 + Export（Excel xlsx）→ 动态脱敏 → 隐私增强导出 → 审计校验 → 看板」
+的顺序跑一遍，逐项打印 `[OK]/[FAIL]`，末尾给出退出码（0 = 全通过）。Excel 步骤用 `samples/demo-sheet.xlsx`
+（可用 `python -m samples.make_demo_xlsx` 重新生成）：先上传看分级，再走 `POST /detect/file/export` 拿回真脱敏的 xlsx
+并解包校验「表头保留、原文手机号已掩码」。
 
 ```powershell
 # 先起服务（或双击桌面 FlowMask.exe），再跑演示
@@ -765,7 +767,7 @@ powershell -ExecutionPolicy Bypass -File scripts\demo.ps1 -BaseUrl http://127.0.
 常用参数：`-BaseUrl`、`-NoBrowser`、`-SkipTraffic`（没有 `samples/demo-traffic.pcap` 时跳过流量步骤）。
 脚本会用 `curl.exe` 传 pcap 与批量文件，临时文件写在系统临时目录并在结束时自动清理。
 
-**换机验证口径**：演示脚本不假设库里有旧数据，用**全新 `FLOWMASK_DATA_DIR` + 空库**跑通全部 8 步
+**换机验证口径**：演示脚本不假设库里有旧数据，用**全新 `FLOWMASK_DATA_DIR` + 空库**跑通全部 9 步
 （本机实测：3 个会话 pcap 导入、批量 3 文件、审计链 11 条 `ok=true`、隐私导出 `total=1` 且
 `l_diversity.ok=false`（单条任务必然不足 `l`，符合定义））——即「新机器上只装依赖 + 起服务」就能复现。
 
