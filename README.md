@@ -6,7 +6,7 @@
 
 | 入口 | 技术栈 | 状态 | 一句话 |
 | --- | --- | --- | --- |
-| `server/`（v2 主链路） | Python 3.12 · FastAPI · SQLite | ✅ 框架完成、621 个测试（616 通过 + 5 跳过；含 pcap 导入、批量检测、实时旁路、浅/深色主题（偏好可按用户存服务端）、L2/L3 真模型联调、性能基准、自由文本 NER 开关、隐私增强导出、策略化文件导出与可逆加密、场景模板、本地 AI 助手、可选图片 OCR） | 上传/粘贴（txt/json/csv/sql/docx/pdf，可选图片 OCR）→ 分级脱敏 → 审计链；`http://127.0.0.1:8090/app/` 正式前端、`/ui/` 零依赖单页 |
+| `server/`（v2 主链路） | Python 3.12 · FastAPI · SQLite | ✅ 框架完成、630 个测试（625 通过 + 5 跳过；含 pcap 导入、批量检测、实时旁路、浅/深色主题（偏好可按用户存服务端）、L2/L3 真模型联调、性能基准、自由文本 NER 开关、隐私增强导出、策略化文件导出与可逆加密、场景模板、本地 AI 助手、可选图片 OCR、Excel xlsx 解析与脱敏导出） | 上传/粘贴（txt/json/csv/sql/docx/xlsx/pdf，可选图片 OCR）→ 分级脱敏 → 审计链；`http://127.0.0.1:8090/app/` 正式前端、`/ui/` 零依赖单页 |
 | `web/`（正式前端） | Vue3 · Element Plus · ECharts · Vite | ✅ 8 个页面 | 即时检测·左右对照 / 批量检测 / 流量导入·实时旁路 / 任务与审计链 / 统计看板 / 识别规则 / 动态脱敏 / 设置；构建产物挂在服务端 `/app` |
 | `cmd/flowmask` + `cmd/netmon`（网络扩展） | Go 1.25 · 纯 Go 抓包 | ✅ pcap → findings → API 可查 | 旁路 pcap/网卡 → 敏感数据识别 → `/api/v1/dlp/*` |
 
@@ -34,7 +34,7 @@ go run ./cmd/genpcaps && go run ./cmd/flowmask -db data/flowmask.db
 
 | 能力 | 说明 | 状态 |
 | --- | --- | --- |
-| 多格式解析与分段定位 | 文本整段；JSON `$` 路径；CSV/TSV `row{n}.{列名}`；SQL 只取 DML 字面量（DDL 保留）；Word 段落/表格；PDF 按页 | ✅ |
+| 多格式解析与分段定位 | 文本整段；JSON `$` 路径；CSV/TSV `row{n}.{列名}`；SQL 只取 DML 字面量（DDL 保留）；Word 段落/表格；Excel xlsx 每张表首行作列名（表头不检测）、数据单元格 `{工作表}!{坐标}`；PDF 按页 | ✅ |
 | 三级协同识别 | L1 17 条规则（含 4 条自由文本规则）+ 省/市地名库补白 + 编码载荷解码复核（base64 / URL-safe / hex / 百分号，支持两层嵌套）+ 校验算法 + 三级敏感词表（法规/行业/企业 YAML，Aho-Corasick，66 词）✅；L2 独立推理服务 ✅（`server/l2_service/`，bert-base-chinese 微调 + ONNX int8 真模型，单条 10–33ms）；L1.5 可选 NER（人名/地址，自由文本召回 22.2%→100%，请求级开关 + 前端标签）✅；L3 独立推理服务 ✅（`server/l3_service/`，Qwen2.5-1.5B-Instruct 指令裁判 + Qwen3Guard-Gen-0.6B 护栏双后端，真权重已实测；默认封顶 L2、只贡献解释） | ✅ |
 | 分级与赋权 | 加权最大 + 共现修正 + 极端类别直达 → L3/L2/L1/SAFE | ✅ |
 | 四级脱敏 + 命中区间 | 四级模板 + `spans` 区间，前端可高亮「原文 → 脱敏」对照 | ✅ |
@@ -48,7 +48,7 @@ go run ./cmd/genpcaps && go run ./cmd/flowmask -db data/flowmask.db
 | 流量导入（服务端 pcap） | 上传 pcap/pcapng → TCP 重组 + HTTP 正文提取 → 复用同一套分级/脱敏/任务/审计；`GET /traffic/sample` 自带示例；前端「流量导入 · pcap」页面一键跑示例（`?demo=1`） | ✅ |
 | 实时旁路（跟随抓包文件） | 持续跟随 dumpcap/Wireshark/自研采集器写出的抓包文件（**pcap / pcapng 都支持**），按窗口把新正文汇总成检测任务（结果进任务页/看板/审计链）；`/traffic/live*` + 前端面板 + `samples/simulate_live_traffic.py` 演示脚本 | ✅ |
 | 动态脱敏视图（授权切换） | `POST /api/v1/dynamic/render` + `/dynamic/policy`：未授权只给脱敏副本、授权返回原文并写审计链；内置页面「动态脱敏」页签可直接演示 | ✅ |
-| 脱敏策略与真脱敏文件导出 | 6 种策略（全屏蔽 / 部分隐藏 / 确定性加盐哈希 / 泛化 / 伪名 / 可逆加密）：`GET /mask-strategies` 查清单；`POST /detect/export`（文本/JSON/CSV/SQL → 同格式文件）、`POST /detect/file/export`（docx→docx、pdf→txt）、`POST /detect/decrypt`（还原 `enc:` 片段）——同一请求内用内存原文重建，原文不落库 | ✅ |
+| 脱敏策略与真脱敏文件导出 | 6 种策略（全屏蔽 / 部分隐藏 / 确定性加盐哈希 / 泛化 / 伪名 / 可逆加密）：`GET /mask-strategies` 查清单；`POST /detect/export`（文本/JSON/CSV/SQL → 同格式文件）、`POST /detect/file/export`（docx→docx、xlsx→xlsx、pdf→txt）、`POST /detect/decrypt`（还原 `enc:` 片段）——同一请求内用内存原文重建，原文不落库 | ✅ |
 | 使用场景模板（7 个） | `GET /scenarios`：医院→科研 / 金融风控 / 教学·学生数据 / 安全审计留痕 / 对外发布演示 / 科研分析 / 演示；一次给出策略 + 强制脱敏级别 + L2/L3/NER 开关与留存说明 | ✅ |
 | 本地 AI 助手（规则 + 可选本机模型） | `POST /assistant/suggest`（按场景/字段名/计数推荐方案）、`POST /assistant/advise`（聚合数字做风险研判）、`GET /assistant/health|models`；默认 `rules` 零模型，`FLOWMASK_ASSISTANT_MODE=ollama` 接本机模型，失败自动降级；**输入只含字段名与计数，不传敏感值** | ✅ |
 | 图片 OCR（可选依赖） | `requirements-ocr.txt`（rapidocr-onnxruntime + pillow）+ `FLOWMASK_OCR_ENABLED=1`：`/detect/file` 接收 png/jpg/jpeg/bmp/webp，OCR 出文字后复用同一套识别/脱敏/导出；未启用时给出安装提示，不返回 500 | ✅ |

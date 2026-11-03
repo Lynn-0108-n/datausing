@@ -7,7 +7,7 @@
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
-| 文本/JSON/CSV/SQL/Word/PDF 解析与分段定位 | ✅ | 文本整段；JSON 走 `$` 路径；CSV/TSV 每单元格 `row{n}.{列名}`；SQL 提取 DML 字符串字面量；Word 段落 `p{n}` / 表格 `table{表}.{行}.{列}`；PDF 按页 `page{n}`（依赖可选 `pdfplumber`） |
+| 文本/JSON/CSV/SQL/Word/Excel/PDF 解析与分段定位 | ✅ | 文本整段；JSON 走 `$` 路径；CSV/TSV 每单元格 `row{n}.{列名}`；SQL 提取 DML 字符串字面量；Word 段落 `p{n}` / 表格 `table{表}.{行}.{列}`；Excel 每张表首行作列名（表头不检测）、数据单元格 `{工作表}!{坐标}`（零依赖 zip+XML，免 openpyxl）；PDF 按页 `page{n}`（依赖可选 `pdfplumber`） |
 | pcap 流量导入（服务端） | ✅ | 上传 pcap/pcapng → TCP 重组 + HTTP 请求解析 → 每个正文当一个片段，复用同一套识别/分级/脱敏/任务/审计；`GET /traffic/sample` 提供自带示例（`samples/demo-traffic.pcap`）；HTTPS、压缩体与分块传输暂不解析 |
 | 实时旁路（跟随抓包文件） | ✅ | 服务端持续跟随一个不断增长的抓包文件（由 dumpcap/Wireshark/自研采集器写），按「落库窗口」把新正文汇总成检测任务；**pcap 与 pcapng 都支持**（dumpcap 默认写 pcapng）；`/traffic/live*` 管理会话，演示脚本 `samples/simulate_live_traffic.py` |
 | L1 规则识别 | ✅ | 17 条规则（含 4 条自由文本）+ 省/市地名库补白 + 三级敏感词表（66 词，Aho-Corasick） + 身份证 MOD 11-2 / 银行卡 Luhn / IPv4 校验；另加编码载荷解码复核（base64 / URL-safe / hex / 百分号，两层嵌套） |
@@ -28,7 +28,7 @@
 | 批量检测（多文件） | ✅ | `POST /tasks/batch` 一次最多 20 个文件，一个文件一个任务；单个坏文件只在结果里标错，不影响同批其它文件 |
 | 性能基准 | ✅ | `server/bench.py` 本机实测：L1 **0.022 ms**/条（≈4.4 万条每秒）、端到端 `/detect` **2.18 ms**（≈459 请求/秒）、L2 int8 单条 7.4→4.1 ms、L3 1.5B **1.16 s**/条；报告 `docs/性能报告.md` 可一条命令复跑 |
 | 动态脱敏视图（授权切换） | ✅ | `POST /api/v1/dynamic/render`：未授权返回脱敏副本、授权返回原文并写审计链；`GET /dynamic/policy` 给出四级策略表；内置页面「动态脱敏」页签可直接演示 |
-| 脱敏策略与文件导出 | ✅ | 6 种策略（block/partial/hash/generalize/pseudonym/encrypt）：`GET /mask-strategies`、`POST /detect/export`（text/json/csv/sql）、`POST /detect/file/export`（docx→docx、pdf→txt）、`POST /detect/decrypt`；哈希/伪名确定性加盐，加密用 HMAC-SHA256 计数器流，密钥 `FLOWMASK_EXPORT_SECRET`（默认自动生成落 `export_secret.key`） |
+| 脱敏策略与文件导出 | ✅ | 6 种策略（block/partial/hash/generalize/pseudonym/encrypt）：`GET /mask-strategies`、`POST /detect/export`（text/json/csv/sql）、`POST /detect/file/export`（docx→docx、xlsx→xlsx、pdf→txt）、`POST /detect/decrypt`；哈希/伪名确定性加盐，加密用 HMAC-SHA256 计数器流，密钥 `FLOWMASK_EXPORT_SECRET`（默认自动生成落 `export_secret.key`） |
 | 使用场景模板 | ✅ | `GET /scenarios`：7 个模板（医院→科研 / 金融风控 / 教学·学生数据 / 安全审计留痕 / 对外发布演示 / 科研分析 / 演示），一次给出策略 + 强制脱敏级别 + L2/L3/NER 开关与留存说明 |
 | 本地 AI 助手 | ✅ | `/assistant/health|models|suggest|advise`：默认 `rules` 纯本地规则、零模型；`FLOWMASK_ASSISTANT_MODE=ollama` 接本机模型，失败自动降级且接口仍 200；输入只含字段名/计数，不传敏感值 |
 | 图片 OCR（可选） | ✅ | `requirements-ocr.txt`（rapidocr-onnxruntime + pillow）+ `FLOWMASK_OCR_ENABLED=1`；`/detect/file` 接收 png/jpg/jpeg/bmp/webp 并 OCR 取文字；未启用时 `/formats` 给提示、解析返回 422 固定文案 |
@@ -63,7 +63,7 @@ scripts\stop_local.cmd                            # 停止全部
 ### 2.2 手动启动（分步调试用）
 
 ```powershell
-python -m pytest -o addopts="" -q    # 621 个用例（616 通过 + 5 跳过；4 个性能预算用例需 FLOWMASK_RUN_PERF=1）
+python -m pytest -o addopts="" -q    # 630 个用例（625 通过 + 5 跳过；4 个性能预算用例需 FLOWMASK_RUN_PERF=1）
 python -m bench --markdown-out ../docs/性能报告.md   # 性能基准（L1/端到端/L2；加 --l3-endpoint 测 L3）
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
 # 构建正式前端（可选，需 Node 18+；产物在 ../web/dist）
@@ -351,7 +351,7 @@ python -m app.evaluate     # 默认 L1 only，几秒钟出结果
 | POST | `/detect/file` | 即时检测上传文件（multipart） |
 | GET | `/mask-strategies` | 6 种脱敏策略清单、说明与示例（前端策略下拉用） |
 | POST | `/detect/export` | 即时脱敏导出：`{text, content_type: text\|json\|csv\|sql, strategy, fmt?}` → 直接返回脱敏文件字节 |
-| POST | `/detect/file/export` | 上传文件即时导出（docx→docx、pdf→txt、csv/json/sql→同格式） |
+| POST | `/detect/file/export` | 上传文件即时导出（docx→docx、xlsx→xlsx、pdf→txt、csv/json/sql→同格式） |
 | POST | `/detect/decrypt` | 还原 `enc:` 加密片段（`{ciphertext}`，服务端 `FLOWMASK_EXPORT_SECRET`） |
 | GET | `/scenarios` | 使用场景模板（7 个；检测页「使用场景」与 AI 推荐共用） |
 | GET | `/assistant/health` / `/assistant/models` | 本地 AI 助手状态 / 本机模型列表（ollama） |
@@ -495,7 +495,7 @@ server/
     core/
       config.py        Settings（环境变量，frozen dataclass + lru_cache）
       db.py            sqlite3 封装：tasks/findings/alerts/audit_log/rules/user_prefs 六张表 + 写锁 + WAL
-    parsers/           输入分段：text/json/csv/sql/docx/pdf + image（OCR，可选）+ registry 统一入口（PDF 依赖可选 pdfplumber）
+    parsers/           输入分段：text/json/csv/sql/docx/xlsx/pdf + image（OCR，可选）+ registry 统一入口（PDF 依赖可选 pdfplumber；docx/xlsx 零依赖自研）
     webui/
       index.html       自带单页界面：上传/粘贴 → 左原文高亮 / 右脱敏副本（无需前端工具链）
     identify/
@@ -510,7 +510,7 @@ server/
     tasks/
       service.py       后台任务执行、findings 落库、逐条写审计
       export.py        jsonl/json/csv/sql 导出
-      document_export.py  按脱敏策略重建真实文件（txt/json/csv/sql/docx；pdf→txt）
+      document_export.py  按脱敏策略重建真实文件（txt/json/csv/sql/docx/xlsx；pdf→txt）
     audit/
       chain.py         HMAC 哈希链：追加、查询、校验
     api/
@@ -530,7 +530,7 @@ l3_training/         L3 指令微调：金标→指令样本、LoRA 训练、权
   l3_service/          L3 推理服务（mock / hf / instruct 后端 + /v1/judge”）
   samples/             自带示例抓包生成脚本与 demo-traffic.pcap
   eval/                评测集（351 条主集 + 200 条 NER 压力集）与评测说明
-  tests/               531 个用例：识别、解析（含 Word/PDF）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、长文本性能、前端与脚本静态回归、桌面打包配置（图标/托盘/安装包）、网页端快捷方式
+  tests/               630 个用例：识别、解析（含 Word/PDF/Excel）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、长文本性能、前端与脚本静态回归、桌面打包配置（图标/托盘/安装包）、网页端快捷方式
   pyproject.toml
   requirements.txt     运行依赖（固定版本）
   requirements-ml.txt  可选：L2/L3/NER/训练与导出
