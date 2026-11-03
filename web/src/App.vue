@@ -8,6 +8,7 @@ import StatsView from "./views/StatsView.vue";
 import RulesView from "./views/RulesView.vue";
 import DynamicView from "./views/DynamicView.vue";
 import TrafficView from "./views/TrafficView.vue";
+import SettingsView from "./views/SettingsView.vue";
 import { api } from "./api";
 import { operator, setOperator, syncThemeFromServer, theme, toggleTheme } from "./theme";
 
@@ -19,6 +20,7 @@ const tabs = [
   { key: "stats", label: "统计看板", comp: StatsView },
   { key: "rules", label: "识别规则", comp: RulesView },
   { key: "dynamic", label: "动态脱敏 · 授权切换", comp: DynamicView },
+  { key: "settings", label: "设置 · 策略与助手", comp: SettingsView },
 ];
 
 const hashTab = (location.hash || '').replace('#', '');

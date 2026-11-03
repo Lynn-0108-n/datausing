@@ -90,6 +90,38 @@ export async function downloadWithAuth(url, fallbackName) {
   return name;
 }
 
+// 脱敏文件导出走「带请求体的下载」：POST + JSON 或 multipart，响应是二进制附件，
+// 不能复用 request()（它会按 JSON 解析），也不能复用 downloadWithAuth（它只发 GET）。
+// 鉴权头照抄 authHeaders()，文件名优先取 Content-Disposition。
+export async function downloadWithBody(path, options, fallbackName = "flowmask-export.bin") {
+  const res = await fetch(BASE + path, { ...options, headers: authHeaders(options.headers) });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      if (body && body.detail) detail = body.detail;
+    } catch {
+      /* 非 JSON 错误体，保留 statusText */
+    }
+    if (res.status === 401) {
+      detail = "缺少或错误的 API Token：请在浏览器 localStorage 设置 flowmask_token（见 README）";
+    }
+    throw new Error(`${res.status} ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+  }
+  const blob = await res.blob();
+  const name = fileNameFromDisposition(res.headers.get("Content-Disposition")) || fallbackName;
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // click 之后立刻 revoke 在部分浏览器会取不到内容，推迟到下一轮事件循环
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+  return name;
+}
+
 export const api = {
   health: () => request("/health"),
   formats: () => request("/formats"),
@@ -183,6 +215,42 @@ export const api = {
     if (opts.minLevel) qs.set("min_level", opts.minLevel);
     return request(`/tasks/batch?${qs.toString()}`, { method: "POST", body: fd });
   },
+
+  // ---------------------------------------------------------------------
+  // 第一次优化：脱敏策略 / 场景模板 / 脱敏文件导出 / AI 助手
+  // ---------------------------------------------------------------------
+
+  // 脱敏策略清单：下拉选项、说明、是否可逆、示例全部由服务端给，前端不再各写一份
+  fetchMaskStrategies: () => request("/mask-strategies"),
+  // 场景模板：一次套用推荐策略 + 级别 + L2/L3/NER 开关 + 数据保留说明
+  fetchScenarios: () => request("/scenarios"),
+
+  // 即时检测的脱敏文件导出（文本入口）：返回二进制附件并直接触发下载
+  exportDetectText: (payload, fallbackName = "flowmask-masked.txt") =>
+    downloadWithBody("/detect/export", jsonBody(payload), fallbackName),
+  // 文件入口：multipart，字段按契约平铺（strategy/fmt/enable_l2/enable_l3/enable_ner/enable_keywords）
+  exportDetectFile: (file, opts = {}, fallbackName = "flowmask-masked.bin") => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("strategy", opts.strategy || "partial");
+    fd.append("fmt", opts.fmt || "auto");
+    fd.append("enable_l2", opts.enableL2 ? "true" : "false");
+    fd.append("enable_l3", opts.enableL3 ? "true" : "false");
+    fd.append("enable_ner", opts.enableNer ? "true" : "false");
+    if (opts.enableKeywords !== undefined && opts.enableKeywords !== null) {
+      fd.append("enable_keywords", opts.enableKeywords ? "true" : "false");
+    }
+    return downloadWithBody("/detect/file/export", { method: "POST", body: fd }, fallbackName);
+  },
+
+  // 还原「加密」策略产出的 enc: 密文（只在本机服务端还原）
+  decryptText: (ciphertext) => request("/detect/decrypt", jsonBody({ ciphertext })),
+
+  // 本地 AI 助手：推荐脱敏方案 / 风险研判（rules 模式纯本地规则，ollama 模式连本机模型）
+  suggestMasking: (payload) => request("/assistant/suggest", jsonBody(payload)),
+  adviseRisk: (payload) => request("/assistant/advise", jsonBody(payload)),
+  fetchAssistantHealth: () => request("/assistant/health"),
+  fetchAssistantModels: () => request("/assistant/models"),
 };
 
 export const LEVEL_COLORS = { L3: "#dc2626", L2: "#ea580c", L1: "#d97706", SAFE: "#0d9488" };

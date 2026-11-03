@@ -13,6 +13,37 @@ const charts = [];
 let resizeHandler = null;
 let stopWatchTheme = null;
 
+// AI 风险研判：只发聚合数字（各级别/类别命中数、任务数），不发原文
+const adviseLoading = ref(false);
+const adviseError = ref("");
+const adviseResult = ref(null);
+const SOURCE_LABELS = { rules: "本地规则", local_llm: "本机模型", degraded: "模型不可用已回退" };
+const adviseSource = ref("");
+
+async function runAdvise() {
+  if (!stats.value) {
+    adviseError.value = "统计还没加载出来，先点「刷新」。";
+    return;
+  }
+  adviseLoading.value = true;
+  adviseError.value = "";
+  try {
+    const body = await api.adviseRisk({
+      by_level: stats.value.by_level || {},
+      by_type: stats.value.by_type || [],
+      total_findings: stats.value.total_findings || 0,
+      tasks: stats.value.tasks || 0,
+    });
+    adviseResult.value = body;
+    adviseSource.value = SOURCE_LABELS[body.source] || body.source || "未知来源";
+  } catch (err) {
+    adviseResult.value = null;
+    adviseError.value = `研判失败：${err}`;
+  } finally {
+    adviseLoading.value = false;
+  }
+}
+
 function ensureChart(el) {
   if (!el) return null;
   let chart = echarts.getInstanceByDom(el);
@@ -179,5 +210,46 @@ onBeforeUnmount(() => {
         <div ref="histEl" class="chart"></div>
       </div>
     </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-title">
+      AI 风险研判
+      <span class="hint">基于当前聚合统计生成结论与建议，不上传原文</span>
+    </div>
+    <div class="toolbar" style="margin-top: 0">
+      <el-button type="primary" size="small" :loading="adviseLoading" :disabled="!stats" @click="runAdvise">
+        生成研判
+      </el-button>
+      <span v-if="adviseResult" class="hint">
+        来源：{{ adviseSource }} · 发现 {{ adviseResult.findings.length }} 条 · 建议
+        {{ adviseResult.recommendations.length }} 条
+      </span>
+    </div>
+    <div v-if="adviseError" class="hint-line" style="color: #dc2626">{{ adviseError }}</div>
+    <div v-if="adviseLoading" class="empty">正在研判…</div>
+    <template v-else-if="adviseResult">
+      <div class="pane" style="margin-top: 12px">
+        <div class="pane-head">结论</div>
+        <div class="pane-body">{{ adviseResult.summary }}</div>
+      </div>
+      <div class="compare" style="margin-top: 14px">
+        <div class="pane">
+          <div class="pane-head">发现</div>
+          <ul v-if="adviseResult.findings.length" class="list-num">
+            <li v-for="(item, index) in adviseResult.findings" :key="index">{{ item }}</li>
+          </ul>
+          <div v-else class="empty">暂无发现</div>
+        </div>
+        <div class="pane">
+          <div class="pane-head">建议</div>
+          <ul v-if="adviseResult.recommendations.length" class="list-num">
+            <li v-for="(item, index) in adviseResult.recommendations" :key="index">{{ item }}</li>
+          </ul>
+          <div v-else class="empty">暂无建议</div>
+        </div>
+      </div>
+    </template>
+    <div v-else class="empty">还没有研判结果，点「生成研判」基于当前统计生成</div>
   </div>
 </template>
