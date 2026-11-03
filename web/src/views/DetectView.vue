@@ -164,9 +164,10 @@ const FMT_LABELS = {
   csv: "CSV",
   sql: "SQL",
   docx: "Word docx",
+  xlsx: "Excel xlsx",
 };
 const TEXT_FMTS = ["auto", "txt", "json", "csv", "sql"];
-const FILE_FMTS = ["auto", "txt", "docx", "json", "csv", "sql"];
+const FILE_FMTS = ["auto", "txt", "docx", "xlsx", "json", "csv", "sql"];
 const exportFmt = ref("auto");
 const exportLoading = ref(false);
 const exportError = ref("");
@@ -411,7 +412,12 @@ onMounted(async () => {
         {{ enableNer ? "NER 已开启" : "NER 已关闭" }}
       </el-tag>
       <el-button type="primary" :loading="loading" @click="runDetect">检测</el-button>
-      <el-upload :auto-upload="false" :show-file-list="false" :on-change="onFileChange">
+      <el-upload
+        :auto-upload="false"
+        :show-file-list="false"
+        :on-change="onFileChange"
+        accept=".txt,.log,.md,.json,.csv,.tsv,.sql,.docx,.pdf,.xlsx"
+      >
         <el-button>上传文件</el-button>
       </el-upload>
       <el-button @click="text = SAMPLE">恢复示例</el-button>

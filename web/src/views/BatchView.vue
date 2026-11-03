@@ -197,11 +197,11 @@ onBeforeUnmount(() => {
       :auto-upload="false"
       :limit="MAX_FILES"
       :on-change="onChange"
-      accept=".txt,.log,.md,.json,.csv,.tsv,.sql,.docx,.pdf"
+      accept=".txt,.log,.md,.json,.csv,.tsv,.sql,.docx,.pdf,.xlsx"
     >
       <div class="upload-tip">
         <div class="upload-title">点击或拖拽多个文件到这里</div>
-        <div class="upload-sub">支持 txt / json / csv / sql / docx / pdf，单文件上限由服务端配置（默认 20 MB）</div>
+        <div class="upload-sub">支持 txt / json / csv / sql / docx / xlsx / pdf，单文件上限由服务端配置（默认 20 MB）</div>
       </div>
     </el-upload>
 

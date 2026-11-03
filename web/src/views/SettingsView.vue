@@ -129,7 +129,7 @@ const FAQ = [
   },
   {
     q: "支持哪些输入格式？",
-    a: "文本 / Markdown / 日志（txt、md、log）、JSON、CSV / TSV、SQL、Word（docx）。PDF 依赖可选库 pdfplumber / pypdf，缺依赖时会返回明确的安装提示而不是假装解析成功；扫描件 PDF 没有文本层，需要先 OCR。图片 OCR 见下一条。",
+    a: "文本 / Markdown / 日志（txt、md、log）、JSON、CSV / TSV、SQL、Word（docx）、Excel（xlsx）。docx 与 xlsx 都由服务端零依赖自研解析（zip + XML），不额外需要 python-docx / openpyxl；xlsx 每张工作表只检测表头以下的数据行，表头只作为列名提示。PDF 依赖可选库 pdfplumber / pypdf，缺依赖时会返回明确的安装提示而不是假装解析成功；扫描件 PDF 没有文本层，需要先 OCR。图片 OCR 见下一条。",
   },
   {
     q: "加密内容如何还原？",
