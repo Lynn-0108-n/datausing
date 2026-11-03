@@ -292,7 +292,14 @@ class HealthOut(BaseModel):
     # L1.5 是否可用（模型加载成功），供前端决定是否显示「自由文本模式」
     ner: bool = False
     ner_backend: str = ""
+    # 图片 OCR 是否可用（需要可选依赖 requirements-ocr.txt，默认关闭）
+    ocr: bool = False
+    ocr_backend: str = ""
+    # 本地 AI 助手是否可用（默认 rules 模式，不需要模型）
+    assistant: bool = False
+    assistant_model: str = ""
     uptime_s: int
+
 
 class DynamicRenderIn(BaseModel):
     """动态脱敏渲染请求：同一段文本，按是否授权返回两种视图。"""
@@ -459,3 +466,135 @@ class PreferenceUserOut(BaseModel):
 class PreferenceUsersOut(BaseModel):
     users: list[PreferenceUserOut] = Field(default_factory=list)
     total: int = 0
+
+
+# --------------------------------------------------------------------------
+# 第一次优化：脱敏策略 / 场景模板 / 脱敏文件导出 / AI 助手
+# （契约先落在这里，实现分别在 identify/masking.py、scenarios.py、assistant.py、
+#   tasks/document_export.py、api/routes_detect.py、api/routes_assistant.py）
+# --------------------------------------------------------------------------
+
+
+class MaskStrategyOut(BaseModel):
+    """一种脱敏策略：前端下拉框与说明文案都从这里取，避免前后端各写一份。"""
+
+    key: str
+    label: str
+    description: str
+    reversible: bool = Field(default=False, description="是否可通过服务端密钥/映射还原")
+    examples: list[dict[str, str]] = Field(
+        default_factory=list, description="示例：category / raw / masked（示例值均为虚构）"
+    )
+
+
+class MaskStrategiesOut(BaseModel):
+    strategies: list[MaskStrategyOut]
+    default: str = "partial"
+
+
+class ScenarioOut(BaseModel):
+    """使用场景模板：一次选好"脱敏到什么程度、用什么策略、要不要开 L2/L3/NER"。"""
+
+    key: str
+    label: str
+    description: str
+    content_types: list[str] = Field(default_factory=list, description="适用数据形态：text/json/csv/sql/image")
+    strategy: str
+    mask_level: str = Field(description="强制脱敏级别：L3/L2/L1")
+    min_level: str = Field(default="SAFE", description="返回/显示的最低级别")
+    enable_l2: bool = False
+    enable_l3: bool = False
+    enable_ner: bool = False
+    retention: str = Field(default="", description="数据保留/流转说明")
+
+
+class ScenariosOut(BaseModel):
+    scenarios: list[ScenarioOut]
+    total: int = 0
+
+
+class DetectExportRequest(BaseModel):
+    """即时脱敏导出：同一请求内用内存里的原文重建文件，原文不落库。"""
+
+    text: str = Field(min_length=1, max_length=200_000, description="原文（文本/JSON/CSV/SQL 序列化后的字符串）")
+    content_type: str = Field(
+        default="text", description="原文形态：text / json / csv / sql / docx（docx 仅上传入口使用）"
+    )
+    strategy: str = Field(
+        default="partial",
+        description="脱敏策略：block / partial / hash / generalize / pseudonym / encrypt",
+    )
+    fmt: str = Field(
+        default="auto", description="输出格式：auto（跟随 content_type）/ txt / json / csv / sql / docx"
+    )
+    enable_l2: bool = False
+    enable_l3: bool = False
+    enable_ner: bool | None = None
+    enable_keywords: bool | None = None
+    min_level: str = Field(default="SAFE", description="只返回 ≥ 该级别的结果（不影响导出内容的完整脱敏）")
+
+
+class DetectDecryptIn(BaseModel):
+    """加密策略导出的还原：只接受本机服务端密钥加密的 ``enc:`` 片段。"""
+
+    ciphertext: str = Field(min_length=1, max_length=200_000)
+
+
+class DetectDecryptOut(BaseModel):
+    text: str
+    replaced: int = Field(description="还原的密文片段数")
+    strategy: str = "encrypt"
+
+
+class AssistantSuggestIn(BaseModel):
+    """AI 助手推荐脱敏方案的输入：**只传字段名与计数，不传敏感值**。"""
+
+    scenario: str | None = Field(default=None, description="场景键（可选，见 /scenarios）")
+    content_type: str = Field(default="text")
+    fields: list[str] = Field(default_factory=list, max_length=64, description="字段/列名（不含值）")
+    level_counts: dict[str, int] = Field(default_factory=dict, description="各级别命中数")
+    text_length: int = Field(default=0, ge=0, le=1_000_000)
+    prompt: str = Field(default="", max_length=200, description="用途说明（不含敏感值，如“交给学校科研团队分析”）")
+
+
+class AssistantSuggestionOut(BaseModel):
+    strategy: str
+    mask_level: str
+    min_level: str
+    enable_l2: bool
+    enable_l3: bool
+    enable_ner: bool
+    retention: str
+    rationale: str
+    source: str = Field(description="rules（本地规则）/ local_llm（本机模型）/ degraded（模型失败回退规则）")
+
+
+class AssistantAdviseIn(BaseModel):
+    """统计看板的风险研判输入：聚合数字，不含原文。"""
+
+    by_level: dict[str, int] = Field(default_factory=dict)
+    by_type: list[dict[str, Any]] = Field(default_factory=list)
+    total_findings: int = 0
+    tasks: int = 0
+    scenario: str | None = None
+
+
+class AssistantAdviseOut(BaseModel):
+    summary: str
+    findings: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+    source: str = "rules"
+
+
+class AssistantHealthOut(BaseModel):
+    enabled: bool
+    mode: str
+    model: str
+    available: bool = Field(description="本机模型是否可用；rules 模式下为 True")
+    note: str = ""
+
+
+class AssistantModelsOut(BaseModel):
+    models: list[str] = Field(default_factory=list)
+    endpoint: str = ""
+    note: str = ""

@@ -1,0 +1,344 @@
+"""脱敏文件导出：把"同一请求内存里的原文"按策略重建成可下载文件。
+
+设计约束与 ``tasks/export.py`` 一致：**原文不落库**，完整脱敏文件只能在同一请求内
+生成（``POST /api/v1/detect/export`` / ``POST /api/v1/detect/file/export``）。
+结构化格式无法逐字节保留原排版（JSON 会重新缩进、CSV 会重新转义、DOCX 只重建
+"段落级"文本），属于"尽力重建、格式可能规范化"：内容（字段、行、语句、段落）在，
+样式会丢。PDF 无法可靠重建，因此只支持导出为 txt。
+
+``build_masked_bytes`` 只依赖标准库（csv/json/zipfile），不引入新依赖。
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import json
+import zipfile
+from xml.sax.saxutils import escape
+
+from ..identify.masking import (
+    mask_spans_with_strategy,
+    mask_value_strategy,
+    normalize_strategy,
+)
+from ..identify.pipeline import DocumentReport
+from ..parsers.base import Document
+
+#: 允许显式指定的输出格式
+EXPORT_FORMATS = ("txt", "json", "csv", "sql", "docx")
+
+#: ``fmt="auto"`` 时按文档形态选默认输出格式
+DEFAULT_FORMATS: dict[str, str] = {
+    "text": "txt",
+    "json": "json",
+    "csv": "csv",
+    "sql": "sql",
+    "docx": "docx",
+    "pdf": "txt",  # PDF 只能导出文本
+}
+
+#: 输出格式 → (Content-Type, 扩展名)
+_MEDIA_TYPES: dict[str, tuple[str, str]] = {
+    "txt": ("text/plain;charset=utf-8", "txt"),
+    "json": ("application/json;charset=utf-8", "json"),
+    "csv": ("text/csv;charset=utf-8", "csv"),
+    "sql": ("application/sql;charset=utf-8", "sql"),
+    "docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
+}
+
+
+def _resolve_fmt(document: Document, fmt: str) -> str:
+    """归一化输出格式：``auto`` 跟随文档形态；显式值必须在白名单内。"""
+    key = (fmt or "auto").strip().lower()
+    if key == "auto":
+        return DEFAULT_FORMATS.get(document.content_type, "txt")
+    if key not in EXPORT_FORMATS:
+        raise ValueError("不支持的输出格式")
+    if document.content_type == "pdf" and key != "txt":
+        raise ValueError("PDF 仅支持导出 txt")
+    return key
+
+
+def _masked_texts(document: Document, report: DocumentReport, strategy: str, secret: str) -> dict[str, str]:
+    """逐 segment 生成掩码文本，按 path 索引。
+
+    报告里的 ``all_findings`` 是 ``document.segments`` 的子序列（没命中的段不出现），
+    因此不能按下标对齐，必须按 path 回填；找不到报告的段原样保留。``spans`` 是相对
+    segment 文本的偏移，交给 :func:`mask_spans_with_strategy` 从后往前替换。
+    """
+    findings = report.all_findings or report.findings
+    by_path = {finding.path: finding for finding in findings}
+    masked: dict[str, str] = {}
+    for segment in document.segments:
+        finding = by_path.get(segment.path)
+        if finding is None:
+            masked[segment.path] = segment.text
+        elif finding.spans:
+            masked[segment.path] = mask_spans_with_strategy(segment.text, finding.spans, strategy, secret)
+        elif finding.masked:
+            # 没有精确区间（例如只有类别级证据）时退回流水线给出的脱敏副本
+            masked[segment.path] = finding.masked
+        else:
+            masked[segment.path] = segment.text
+    return masked
+
+
+# ---- txt -------------------------------------------------------------------
+
+
+def _build_txt(document: Document, _report: DocumentReport, _strategy: str, _secret: str, masked: dict[str, str]) -> bytes:
+    """纯文本：每个 segment 一行，按文档顺序拼接。"""
+    return "\n".join(masked.get(segment.path, segment.text) for segment in document.segments).encode("utf-8")
+
+
+# ---- json ------------------------------------------------------------------
+
+
+def _json_path_tokens(path: str) -> list[str | int] | None:
+    """把 ``$.a.b[0]`` 拆成 ``["a", "b", 0]``；含点号的键名无法区分，返回 None。"""
+    if not path.startswith("$"):
+        return None
+    tokens: list[str | int] = []
+    index = 1
+    length = len(path)
+    while index < length:
+        char = path[index]
+        if char == ".":
+            index += 1
+            end = index
+            while end < length and path[end] not in ".[":
+                end += 1
+            if end == index:
+                return None
+            tokens.append(path[index:end])
+            index = end
+        elif char == "[":
+            end = path.find("]", index)
+            if end < 0:
+                return None
+            try:
+                tokens.append(int(path[index + 1 : end]))
+            except ValueError:
+                return None
+            index = end + 1
+        else:
+            return None
+    return tokens or None
+
+
+def _set_json_value(root: object, path: str, value: str) -> bool:
+    """按简化 JSONPath 把 ``value`` 写回已解析的 JSON 树；定位失败返回 False。"""
+    tokens = _json_path_tokens(path)
+    if not tokens:
+        return False
+    node = root
+    for token in tokens[:-1]:
+        try:
+            node = node[token]  # type: ignore[index]
+        except (KeyError, IndexError, TypeError):
+            return False
+    last = tokens[-1]
+    try:
+        if isinstance(node, dict) and isinstance(last, str):
+            node[last] = value
+            return True
+        if isinstance(node, list) and isinstance(last, int):
+            node[last] = value
+            return True
+    except (KeyError, IndexError, TypeError):
+        return False
+    return False
+
+
+def _build_json(document: Document, _report: DocumentReport, _strategy: str, _secret: str, masked: dict[str, str]) -> bytes:
+    """JSON：解析原文，按 finding.path 把敏感字段替换成掩码值后重新序列化。
+
+    重新 ``json.dumps(indent=2)`` 会规范化空白与键顺序（内容不变）；含点号的键名
+    无法用简化路径定位，这类片段保持原值（正常数据里极少见）。
+    """
+    try:
+        data = json.loads(document.raw)
+    except ValueError as exc:
+        raise ValueError("JSON 原文无法解析") from exc
+    for segment in document.segments:
+        value = masked.get(segment.path, segment.text)
+        # 根节点本身就是字符串时路径是 "$"，没有可下钻的 token，直接替换整棵树
+        if segment.path == "$" and isinstance(data, str):
+            data = value
+            continue
+        _set_json_value(data, segment.path, value)
+    return json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+# ---- csv -------------------------------------------------------------------
+
+
+def _parse_csv_path(path: str) -> tuple[int, str] | None:
+    """``row2.手机号`` → ``(2, "手机号")``；不合法返回 None。"""
+    if not path.startswith("row"):
+        return None
+    rest = path[3:]
+    dot = rest.find(".")
+    if dot <= 0:
+        return None
+    try:
+        row_index = int(rest[:dot])
+    except ValueError:
+        return None
+    return (row_index, rest[dot + 1:]) if row_index > 0 else None
+
+
+def _build_csv(document: Document, _report: DocumentReport, _strategy: str, _secret: str, masked: dict[str, str]) -> bytes:
+    """CSV：重新读原文，按段落的行列元数据替换单元格，再由 csv 模块负责转义。"""
+    rows = [row for row in csv.reader(io.StringIO(document.raw)) if any(cell.strip() for cell in row)]
+    if not rows:
+        raise ValueError("CSV 原文为空")
+    columns = list(document.meta.get("columns") or [])  # type: ignore[arg-type]
+    column_index = {str(name): index for index, name in enumerate(columns)}
+    for path, value in masked.items():
+        parsed = _parse_csv_path(path)
+        if parsed is None:
+            continue
+        row_index, column = parsed
+        column_position = column_index.get(column)
+        if column_position is None or row_index >= len(rows):
+            continue
+        row = rows[row_index]
+        while len(row) <= column_position:
+            row.append("")
+        row[column_position] = value
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, lineterminator="\n")
+    writer.writerows(rows)
+    return buffer.getvalue().encode("utf-8")
+
+
+# ---- sql -------------------------------------------------------------------
+
+
+def _build_sql(document: Document, report: DocumentReport, strategy: str, secret: str, masked: dict[str, str]) -> bytes:
+    """SQL：用 spans 的绝对偏移从后往前 splice，注释与多条语句原样保留。
+
+    SQL 字面量有真实 ``offset``（见 ``parsers/sql_parser.py``），所以这里能逐字节
+    保留 DDL / 注释 / 语句结构，只替换字面量内容。
+    """
+    raw = document.raw
+    segments = {segment.path: segment for segment in document.segments}
+    findings = report.all_findings or report.findings
+    replacements: list[tuple[int, int, str]] = []
+    for finding in findings:
+        segment = segments.get(finding.path)
+        if segment is None or segment.offset < 0:
+            continue
+        if finding.spans:
+            for span in finding.spans:
+                try:
+                    start = segment.offset + int(span["start"])  # type: ignore[arg-type]
+                    end = segment.offset + int(span["end"])  # type: ignore[arg-type]
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if start < 0 or end > len(raw) or start >= end:
+                    continue
+                replacements.append(
+                    (start, end, mask_value_strategy(raw[start:end], span.get("type"), strategy, secret))
+                )
+        else:
+            start = segment.offset
+            end = start + len(segment.text)
+            if end <= len(raw):
+                replacements.append((start, end, masked.get(finding.path, segment.text)))
+    parts: list[str] = []
+    cursor = len(raw)
+    for start, end, replacement in sorted(replacements, key=lambda item: item[0], reverse=True):
+        if end > cursor:
+            continue
+        parts.append(raw[end:cursor])
+        parts.append(replacement)
+        cursor = start
+    parts.append(raw[:cursor])
+    return "".join(reversed(parts)).encode("utf-8")
+
+
+# ---- docx ------------------------------------------------------------------
+
+_DOCX_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_CONTENT_TYPES_XML = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    '<Default Extension="xml" ContentType="application/xml"/>'
+    '<Override PartName="/word/document.xml" '
+    'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+    "</Types>"
+)
+_RELS_XML = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    '<Relationship Id="rId1" '
+    'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" '
+    'Target="word/document.xml"/>'
+    "</Relationships>"
+)
+
+
+def _docx_document_xml(paragraphs: list[str]) -> str:
+    """把段落列表拼成最小可用的 ``word/document.xml``（每个掩码段一个 ``w:p``）。"""
+    body = "".join(
+        f'<w:p><w:r><w:t xml:space="preserve">{escape(paragraph)}</w:t></w:r></w:p>'
+        for paragraph in paragraphs
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        f'<w:document xmlns:w="{_DOCX_NAMESPACE}"><w:body>{body}</w:body></w:document>'
+    )
+
+
+def _build_docx(document: Document, _report: DocumentReport, _strategy: str, _secret: str, masked: dict[str, str]) -> bytes:
+    """DOCX：零依赖手写 zip（Content_Types / rels / document.xml），可被本仓解析器反解。
+
+    只重建段落级文本：原文档的样式、表格结构、图片会丢失（"尽力重建"）。
+    """
+    paragraphs = [masked.get(segment.path, segment.text) for segment in document.segments]
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", _CONTENT_TYPES_XML)
+        archive.writestr("_rels/.rels", _RELS_XML)
+        archive.writestr("word/document.xml", _docx_document_xml(paragraphs))
+    return buffer.getvalue()
+
+
+_BUILDERS = {
+    "txt": _build_txt,
+    "json": _build_json,
+    "csv": _build_csv,
+    "sql": _build_sql,
+    "docx": _build_docx,
+}
+
+
+def build_masked_bytes(
+    document: Document,
+    report: DocumentReport,
+    *,
+    strategy: str,
+    fmt: str,
+    secret: str,
+) -> tuple[bytes, str, str]:
+    """按策略把文档重建成脱敏文件，返回 ``(内容, Content-Type, 扩展名)``。
+
+    - ``strategy``：六种策略之一（未知值回退 ``partial``；``encrypt`` 需要非空密钥）；
+    - ``fmt``：``auto`` 跟随文档形态，或显式 ``txt/json/csv/sql/docx``；
+    - ``secret``：hash / pseudonym 的盐与 encrypt 的密钥（来自 ``settings.export_secret``）。
+
+    只替换 ``all_findings`` 里的命中片段（不受 ``min_level`` 影响），保证导出内容
+    与用户看到的级别筛选无关、不漏脱敏。
+    """
+    key = normalize_strategy(strategy)
+    if key == "encrypt" and not secret:
+        raise ValueError("脱敏导出密钥未配置")
+    resolved = _resolve_fmt(document, fmt)
+    masked = _masked_texts(document, report, key, secret)
+    content = _BUILDERS[resolved](document, report, key, secret, masked)
+    media_type, ext = _MEDIA_TYPES[resolved]
+    return content, media_type, ext

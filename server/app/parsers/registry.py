@@ -7,12 +7,14 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import PurePath
 from typing import Callable
 
 from .base import Document, ParseError, ParseUnsupported
 from .csv_parser import parse_csv
 from .docx_parser import parse_docx
+from .image_parser import ocr_engine, parse_image
 from .json_parser import parse_json
 from .pdf_parser import parse_pdf, pdf_engine
 from .sql_parser import parse_sql
@@ -24,6 +26,9 @@ FormatHandler = Callable[[str, bytes], Document]
 # 文本类扩展名 → content_type；二进制文档单独维护（可见性/依赖不同，提示文案也不同）。
 SUPPORTED_TEXT_EXTENSIONS: dict[str, str] = {}
 DOCUMENT_EXTENSIONS: dict[str, str] = {}
+# 图片单独登记：OCR 是可选能力，扩展名仍进分派表与 /formats 的 supported 列表，
+# 但不进 format_specs() 的解析器清单（插件页展示的仍是原有六类内置解析器）。
+IMAGE_EXTENSIONS: dict[str, str] = {}
 _FORMAT_HANDLERS: dict[str, FormatHandler] = {}
 
 
@@ -60,12 +65,17 @@ def register_format(
             continue
         if not suffix.startswith("."):
             suffix = f".{suffix}"
-        existing = SUPPORTED_TEXT_EXTENSIONS.get(suffix) or DOCUMENT_EXTENSIONS.get(suffix)
+        existing = (
+            SUPPORTED_TEXT_EXTENSIONS.get(suffix)
+            or DOCUMENT_EXTENSIONS.get(suffix)
+            or IMAGE_EXTENSIONS.get(suffix)
+        )
         if existing and not replace:
             raise ValueError(f"格式扩展名已被占用：{suffix}（{existing}）")
         if existing:
             SUPPORTED_TEXT_EXTENSIONS.pop(suffix, None)
             DOCUMENT_EXTENSIONS.pop(suffix, None)
+            IMAGE_EXTENSIONS.pop(suffix, None)
         target = DOCUMENT_EXTENSIONS if binary else SUPPORTED_TEXT_EXTENSIONS
         target[suffix] = content_type
         _FORMAT_HANDLERS[suffix] = handler
@@ -93,14 +103,23 @@ def _pdf_handler(filename: str, data: bytes) -> Document:
     return parse_pdf(data, source=filename)
 
 
+def _image_handler(filename: str, data: bytes) -> Document:
+    """图片交给 OCR 解析器；未启用/未安装时 parse_image 会抛 ParseError 提示装依赖。"""
+    return parse_image(data, name=filename)
+
+
 def _register_builtin_formats() -> None:
-    """内置格式：文本类先解码再按形态解析；docx/pdf 走二进制解析器。"""
+    """内置格式：文本类先解码再按形态解析；docx/pdf/图片走二进制解析器。"""
     register_format((".txt", ".log", ".md"), _text_handler(parse_text, mark_suffix=True), content_type="text")
     register_format((".json",), _text_handler(parse_json), content_type="json")
     register_format((".csv", ".tsv"), _text_handler(parse_csv), content_type="csv")
     register_format((".sql",), _text_handler(parse_sql), content_type="sql")
     register_format((".docx",), _docx_handler, content_type="docx", binary=True)
     register_format((".pdf",), _pdf_handler, content_type="pdf", binary=True)
+    # 图片单独登记（见 IMAGE_EXTENSIONS 注释：不参与 format_specs 的插件清单）
+    for suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+        IMAGE_EXTENSIONS[suffix] = "image"
+        _FORMAT_HANDLERS[suffix] = _image_handler
 
 
 _register_builtin_formats()
@@ -126,14 +145,46 @@ def supported_extensions() -> list[str]:
     return sorted(_FORMAT_HANDLERS)
 
 
+def _ocr_enabled_by_env() -> bool:
+    """只读环境变量判断 OCR 开关，不经过 ``get_settings()``（避免创建数据目录）。
+
+    与 ``config.Settings.ocr_enabled`` 的解析规则保持一致；/formats 是只读接口，
+    不能因为一次探测就在仓库里落数据目录或生成密钥。
+    """
+    value = os.environ.get("FLOWMASK_OCR_ENABLED", "").strip().lower()
+    return value in ("1", "true", "yes", "on")
+
+
 def supported_formats() -> dict[str, object]:
-    """给 /formats 与前端用：能传什么、PDF 引擎是否就绪、缺依赖怎么装。"""
+    """给 /formats 与前端用：能传什么、PDF/OCR 是否就绪、缺依赖怎么装。
+
+    这里只做依赖探测，不读 ``get_settings()``——避免在只读 /formats 请求里创建数据
+    目录或写密钥，也让该函数可以在没有临时环境的测试里安全调用。
+
+    OCR 未启用（依赖缺失或 FLOWMASK_OCR_ENABLED 未开）时 ``supported`` 保持原有
+    9 个文本/文档扩展名不变，图片扩展名只在真正可 OCR 后才出现：前端据此决定是否
+    展示「上传图片」入口，而不需要理解配置项。
+    """
     engine = pdf_engine()
+    ocr = ocr_engine()
+    ocr_on = ocr is not None and _ocr_enabled_by_env()
+    supported = supported_extensions()
+    if not ocr_on:
+        supported = [suffix for suffix in supported if suffix not in IMAGE_EXTENSIONS]
+    if ocr_on:
+        ocr_hint = ""
+    elif ocr is None:
+        ocr_hint = "图片 OCR 需要可选依赖：pip install -r requirements-ocr.txt 并设置 FLOWMASK_OCR_ENABLED=1"
+    else:
+        ocr_hint = "图片 OCR 依赖已安装；设置 FLOWMASK_OCR_ENABLED=1 后即可上传图片"
     return {
-        "supported": supported_extensions(),
+        "supported": supported,
         "docx": True,
         "pdf": engine is not None,
         "pdf_engine": engine,
+        "image": ocr_on,
+        "ocr_engine": ocr,
+        "ocr_hint": ocr_hint,
         "hint": "" if engine is not None else "PDF 需要可选依赖：pip install pdfplumber",
     }
 
