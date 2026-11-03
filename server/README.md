@@ -726,15 +726,15 @@ powershell -ExecutionPolicy Bypass -File scripts\create_shortcut.ps1 -Mode web
 
 - **应用图标**：`assets/flowmask.ico`（16/24/32/48/64/128/256 七尺寸）+ `assets/flowmask-128.png`，
   由 `scripts/make_icon.py`（Pillow）从同一套设计生成；`flowmask.spec` 的 `EXE(icon=..., version=assets/flowmask_version.txt)`
-  会把图标和 Windows 版本资源（FileVersion 0.1.0.0 / ProductName FlowMask）嵌进 exe。
+  会把图标和 Windows 版本资源（FileVersion 0.26.0.0 / ProductName FlowMask）嵌进 exe。
   网页端 favicon 用同一张图（`web/public/favicon.ico` → `/app/favicon.ico`）。
   图标文件由测试盯着：`tests/test_assets.py` 校验 ICO 魔数与 favicon 一致，`tests/test_desktop.py` 校验版本资源与 `app.__version__` 对齐。
 - **系统托盘**（exe 双击版默认开启）：关窗口后服务继续驻留，右键托盘图标可「打开 FlowMask / 打开数据目录 / 退出 FlowMask」；
   `--tray` 强制开、`--no-tray` 关闭。托盘依赖是可选的（`requirements-desktop.txt` 里的 `pystray` + `pillow`），
   没装或当前会话无法创建托盘窗口时**自动降级**并打印「托盘未能显示（不影响主服务）：…」，不会影响 Web 服务本身。
 - **安装包**：`scripts\build_installer.ps1`（可加 `-SkipBuild` 复用已构建 exe）会先跑 `build_exe.ps1`，再用 Inno Setup
-  （`installer\FlowMask.iss`，当前用户级安装、无需管理员）编译 `dist_install\FlowMask-Setup-0.1.0.exe`，
-  并顺带打包便携版 `FlowMask-Portable-0.1.0.zip`。脚本会自动在 PATH 与 `%LOCALAPPDATA%\Programs\Inno Setup 6` 找 `ISCC.exe`，
+  （`installer\FlowMask.iss`，当前用户级安装、无需管理员）编译 `dist_install\FlowMask-Setup-0.26.0.exe`，
+  并顺带打包便携版 `FlowMask-Portable-0.26.0.zip`。脚本会自动在 PATH 与 `%LOCALAPPDATA%\Programs\Inno Setup 6` 找 `ISCC.exe`，
   找不到会提示 `winget install --id JRSoftware.InnoSetup -e` 后退出（exit 2）。
   安装目录默认 `%LOCALAPPDATA%\Programs\FlowMask`，带开始菜单/可选桌面快捷方式、卸载入口和 `使用说明.txt`；
   权重（`l2_models/`、`models/`）仍按「放在 exe 同级」的约定外置，安装包不含权重。
