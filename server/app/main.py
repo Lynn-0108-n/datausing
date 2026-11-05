@@ -43,6 +43,7 @@ from .core.paths import frontend_dir, resource_root
 from .core.config import get_settings
 from .core.db import get_database
 from .plugins import load_plugins
+from .security import SecurityError, security_error_response
 from .traffic.live import get_live_manager
 
 # 自带单页控制台随包分发：开发态是 server/app/webui，打包后是解包目录下的 app/webui
@@ -104,6 +105,7 @@ def create_app() -> FastAPI:
             {"name": "preferences", "description": "用户偏好（主题）与多用户记忆"},
         ],
     )
+    app.add_exception_handler(SecurityError, security_error_response)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),
