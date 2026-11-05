@@ -1,7 +1,7 @@
 """脱敏文件导出：把"同一请求内存里的原文"按策略重建成可下载文件。
 
-设计约束与 ``tasks/export.py`` 一致：**原文不落库**，完整脱敏文件只能在同一请求内
-生成（``POST /api/v1/detect/export`` / ``POST /api/v1/detect/file/export``）。
+设计约束与 ``tasks/export.py`` 一致：**原文不落库**，直接导出在一次请求内生成，快照导出复用有界、短寿命内存中的检测证据
+和替换结果（``POST /api/v1/detect/export`` / ``POST /api/v1/detect/file/export``）。
 结构化格式无法逐字节保留原排版（JSON 会重新缩进、CSV 会重新转义、DOCX 只重建
 "段落级"文本），属于"尽力重建、格式可能规范化"：内容（字段、行、语句、段落）在，
 样式会丢。PDF 无法可靠重建，因此只支持导出为 txt。
@@ -87,9 +87,11 @@ def _masked_texts(document: Document, report: DocumentReport, strategy: str, sec
         finding = by_path.get(segment.path)
         if finding is None:
             masked[segment.path] = segment.text
-        elif finding.spans:
+        elif finding.spans and not finding.requires_full_mask:
             spans = protected_spans(segment.text, finding.spans)
-            masked[segment.path] = mask_spans_with_strategy(segment.text, spans, strategy, secret)
+            effective = 'block' if strategy == 'generalize' and any(
+                len(span.get('coverage_types', [])) > 1 for span in spans) else strategy
+            masked[segment.path] = mask_spans_with_strategy(segment.text, spans, effective, secret)
         else:
             # 非位置型证据不能退回原文或低危警示副本，保守处理整个片段。
             masked[segment.path] = mask_value_strategy(segment.text, None, strategy, secret)
@@ -166,8 +168,8 @@ def _set_json_value(root: object, path: str, value: str) -> bool:
 def _build_json(document: Document, _report: DocumentReport, _strategy: str, _secret: str, masked: dict[str, str]) -> bytes:
     """JSON：解析原文，按 finding.path 把敏感字段替换成掩码值后重新序列化。
 
-    重新 ``json.dumps(indent=2)`` 会规范化空白与键顺序（内容不变）；含点号的键名
-    无法用简化路径定位，这类片段保持原值（正常数据里极少见）。
+    重新 ``json.dumps(indent=2)`` 会规范化空白与键顺序（内容不变）；特殊键名
+    按类型化位置回写，定位失败报错；未脱敏数值保持原始类型。
     """
     try:
         data = json.loads(document.raw)
@@ -466,6 +468,7 @@ def build_masked_bytes(
     strategy: str,
     fmt: str,
     secret: str,
+    masked_values: dict[str, str] | None = None,
 ) -> tuple[bytes, str, str]:
     """按策略把文档重建成脱敏文件，返回 ``(内容, Content-Type, 扩展名)``。
 
@@ -481,7 +484,9 @@ def build_masked_bytes(
         raise ValueError("脱敏导出密钥未配置")
     resolved = _resolve_fmt(document, fmt)
     try:
-        masked = _masked_texts(document, report, key, secret)
+        masked = _masked_texts(document, report, key, secret) if masked_values is None else masked_values
+        if set(masked) != {segment.path for segment in document.segments}:
+            raise SecurityError('MASK_LOCATION_INVALID', '快照脱敏片段不完整')
         content = _BUILDERS[resolved](document, report, key, secret, masked)
     except SecurityError:
         raise

@@ -237,24 +237,25 @@ def mask_value_strategy(
         return encrypt_text(value, secret)
 
     # key == "generalize"：按类别保留结构特征
+    def safe_generalization(output: str) -> str:
+        return '[已屏蔽]' if value in output else output
     entity_key = _entity_key(entity)
     if entity_key == EntityType.ID_CARD.value:
-        return value[:6] + "********"
+        return safe_generalization(value[:6] + "********")
     if entity_key == EntityType.PHONE.value:
         if len(value) < 7:
-            return value[:2] + "****"
-        return value[:3] + "****" + value[-2:]
+            return safe_generalization(value[:2] + "****")
+        return safe_generalization(value[:3] + "****" + value[-2:])
     if entity_key == EntityType.BANK_CARD.value:
-        return "****" + value[-4:]
+        return safe_generalization("****" + value[-4:])
     if entity_key == EntityType.EMAIL.value:
         _, separator, domain = value.partition("@")
-        return "***@" + (domain if separator else "")
+        return safe_generalization("***@" + (domain if separator else ""))
     if entity_key == EntityType.NAME.value:
-        return value[0] + "*"
+        return safe_generalization(value[0] + "*")
     if entity_key == EntityType.ADDRESS.value:
-        return value[:3] + "***"
-    return f"[{_entity_label_text(entity)}]"
-
+        return safe_generalization(value[:3] + "***")
+    return safe_generalization(f"[{_entity_label_text(entity)}]")
 
 # ---- 片段级脱敏：给 spans / hits 直接用 ------------------------------------
 

@@ -231,7 +231,7 @@ def test_existing_detect_endpoints_unchanged(client) -> None:
     detected = client.post("/api/v1/detect", json={"text": f"身份证号：{ID_CARD}"})
     assert detected.status_code == 200
     body = detected.json()
-    assert set(body) == {
+    assert set(body) >= {
         "content_type",
         "segments",
         "findings",
@@ -240,6 +240,7 @@ def test_existing_detect_endpoints_unchanged(client) -> None:
         "degraded",
         "masked_document",
     }
+    assert body['result_id'] and body['policy_version']
     assert ID_CARD not in json.dumps(body, ensure_ascii=False)
 
     uploaded = client.post(

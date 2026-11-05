@@ -91,3 +91,64 @@ def test_export_merges_overlapping_ranges_without_leaking_tail(client):
     result = build_masked_bytes(document, report, strategy='block', fmt='auto', secret='test')[0]
     assert PHONE.encode() not in result
     assert PHONE[:4].encode() not in result
+
+
+def test_conflicting_rules_do_not_leave_sensitive_overlap_tail(client):
+    for id_, pattern, type_, weight in [('overlap_low', '(ABC123)', 'phone', .3),
+                                        ('overlap_high', '(123SECRET)', 'secret', .99)]:
+        assert client.post('/api/v1/rules', json={
+            'id': id_, 'name': id_, 'pattern': pattern, 'type': type_, 'weight': weight, 'confidence': .99,
+        }).status_code == 201
+    response = client.post('/api/v1/detect/export', json={'text': 'ABC123SECRET', 'strategy': 'block'})
+    assert response.status_code == 200
+    assert 'SECRET' not in response.text
+
+
+def test_nested_secret_does_not_survive_email_generalization(client):
+    text = 'me@sk-abcdefghijklmnop.com'
+    response = client.post('/api/v1/detect/export', json={'text': text, 'strategy': 'generalize'})
+    assert response.status_code == 200
+    assert 'sk-abcdefghijklmnop' not in response.text
+
+
+def test_stronger_custom_email_cannot_expose_nested_secret(client):
+    client.post('/api/v1/rules', json={'id': 'strong_email', 'name': 'strong', 'type': 'email',
+                'pattern': '(me@sk-[a-z]+\\.com)', 'weight': 1, 'confidence': 1})
+    response = client.post('/api/v1/detect/export', json={
+        'text': 'me@sk-abcdefghijklmnop.com', 'strategy': 'generalize'})
+    assert response.status_code == 200
+    assert 'sk-abcdefghijklmnop' not in response.text
+
+
+@pytest.mark.parametrize('kind,value', [('address', '北京'), ('name', '李'), ('phone', '123'),
+                                      ('bank_card', '1234'), ('id_card', '123456')])
+def test_short_generalization_does_not_preserve_complete_value(kind, value):
+    from app.identify.masking import mask_value_strategy
+    assert value not in mask_value_strategy(value, kind, 'generalize')
+
+
+def test_nonpositional_sensitive_evidence_requires_full_protection(client):
+    from app.identify.l2 import SemanticHit
+    from app.identify.types import EntityType
+    from app.parsers.text import parse_text
+    from app.security import protected_text
+    class Classifier:
+        def available(self): return True
+        def predict(self, text): return [SemanticHit(EntityType.SECRET, .99)]
+    document = parse_text(PHONE + ' PRIVATE_TOKEN_UNLOCATED')
+    report = DetectionPipeline(semantic=Classifier()).analyze_document(document, DetectOptions(enable_l2=True))
+    result = build_masked_bytes(document, report, strategy='block', fmt='txt', secret='test')[0]
+    assert b'PRIVATE_TOKEN_UNLOCATED' not in result
+    assert 'PRIVATE_TOKEN_UNLOCATED' not in protected_text(document.raw, report.findings[0])
+
+
+def test_ner_overlap_does_not_leave_uncovered_tail(client):
+    from app.identify.ner import NerSpan
+    from app.parsers.text import parse_text
+    class Ner:
+        def available(self): return True
+        def detect(self, text): return [NerSpan(0, len(text), 'LOC')]
+    document = parse_text(PHONE + ' PRIVATE_ADDRESS_TAIL')
+    report = DetectionPipeline(ner=Ner()).analyze_document(document, DetectOptions(enable_ner=True))
+    result = build_masked_bytes(document, report, strategy='block', fmt='txt', secret='test')[0]
+    assert b'PRIVATE_ADDRESS_TAIL' not in result

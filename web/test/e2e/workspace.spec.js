@@ -22,6 +22,36 @@ test.beforeEach(async ({ page }) => {
   ).toBeVisible();
 });
 
+test('snapshot export survives rule changes and matches encrypted strategy preview', async ({ page }) => {
+  const ruleId = 'snapshot_e2e';
+  const created = await page.request.post('/api/v1/rules', { data: {
+    id: ruleId, name: 'snapshot e2e', type: 'secret', pattern: 'SEC_(\\d{6})', weight: .9, confidence: .99,
+  } });
+  expect(created.status()).toBe(201);
+  try {
+    const result = await detect(page, 'SEC_123456');
+    expect(result.result_id).toBeTruthy();
+    await expect(page.getByRole('button', { name: /开始检测/ })).toBeEnabled();
+    await page.request.patch(`/api/v1/rules/${ruleId}`, { data: { enabled: false } });
+    const previewResponse = page.waitForResponse(r => r.url().endsWith(`/results/${result.result_id}/preview`));
+    await page.getByRole('combobox', { name: '导出脱敏策略', exact: true }).focus();
+    await page.keyboard.press('Enter');
+    await page.getByRole('option', { name: /加密/ }).click();
+    const preview = await (await previewResponse).json();
+    const request = page.waitForRequest(r => r.url().endsWith('/detect/export'));
+    const download = page.waitForEvent('download');
+    await page.getByRole('button', { name: '导出脱敏文件', exact: true }).click();
+    const payload = (await request).postDataJSON();
+    expect(payload.result_id).toBe(result.result_id);
+    expect(payload).not.toHaveProperty('text');
+    const content = await readFile(await (await download).path(), 'utf8');
+    expect(content).toBe(preview.masked_document.masked);
+    expect(content).not.toContain('123456');
+  } finally {
+    await page.request.delete(`/api/v1/rules/${ruleId}`);
+  }
+});
+
 test("real detection, risk summary, Unicode highlight, details and themes preserve input", async ({
   page,
 }) => {

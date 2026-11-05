@@ -15,7 +15,7 @@ class Segment:
     """一段待检测文本。
 
     ``offset`` 是它在原文中的字符偏移（未知时为 -1）。有偏移的格式（text/sql）
-    可以按区间回写；结构化格式（json/csv）用 ``path`` 定位字段，导出时按字段回填。
+    可以按区间回写；结构化格式（json/csv）用类型化 ``location`` 回填，path用于显示。
     """
 
     path: str

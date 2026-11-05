@@ -40,6 +40,7 @@ class TextTaskIn(BaseModel):
 
 
 class SpanOut(BaseModel):
+    coverage_types: list[str] = Field(default_factory=list)
     """命中区间：前端据此在原文上高亮（偏移是字符下标，不含敏感值本身）。"""
 
     start: int
@@ -50,6 +51,7 @@ class SpanOut(BaseModel):
 
 
 class SegmentOut(BaseModel):
+    requires_full_mask: bool = False
     path: str = Field(description="片段位置：JSON Path / 列名+行号 / SQL 语句+字面量")
     level: str
     score: float
@@ -64,6 +66,11 @@ class SegmentOut(BaseModel):
 
 
 class DetectOut(BaseModel):
+    result_id: str | None = None
+    source_fingerprint: str | None = None
+    ruleset_revision: str | None = None
+    policy_version: str | None = None
+    effective_options: dict[str, Any] = Field(default_factory=dict)
     content_type: str
     segments: int = Field(description="实际检测的片段数")
     findings: list[SegmentOut]
@@ -516,7 +523,9 @@ class ScenariosOut(BaseModel):
 class DetectExportRequest(BaseModel):
     """即时脱敏导出：同一请求内用内存里的原文重建文件，原文不落库。"""
 
-    text: str = Field(min_length=1, max_length=200_000, description="原文（文本/JSON/CSV/SQL 序列化后的字符串）")
+    text: str | None = Field(default=None, min_length=1, max_length=200_000, description="旧直接导出原文；快照导出可省略")
+    result_id: str | None = Field(default=None, max_length=128)
+    policy_version: str | None = Field(default=None, max_length=128)
     content_type: str = Field(
         default="text",
         description="原文形态：text / json / csv / sql / docx / xlsx（docx、xlsx 仅上传入口使用）",

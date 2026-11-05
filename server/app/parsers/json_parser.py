@@ -1,7 +1,7 @@
-﻿"""JSON 文件解析：把对象/数组里的每个字符串值抽成 Segment。
+﻿"""JSON 文件解析：把字符串和数值标量抽成Segment，布尔和null保持原类型。
 
 路径用 ``$`` 开头的简化 JSONPath（``$.user.phone``、``$.items[0].name``），
-前端左侧高亮与右侧脱敏结果都靠这个路径对齐。
+特殊键使用JSON字符串括号表示；回写依赖类型化location，避免路径歧义。
 """
 
 from __future__ import annotations

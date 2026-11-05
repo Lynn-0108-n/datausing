@@ -105,6 +105,7 @@ class Hit:
     rule: str
     # 由解码复核等"间接证据"路径设置：置信度被折价，但底层证据足以判高危
     direct_hint: bool = False
+    coverage_types: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)

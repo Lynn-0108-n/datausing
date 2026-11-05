@@ -66,3 +66,17 @@ def test_task_exception_does_not_persist_or_log_input(client, monkeypatch, caplo
     assert task['error'].startswith('TASK_DETECTION_FAILED:')
     assert CARD not in str(task) + caplog.text
     assert client.get(f'/api/v1/tasks/{task_id}/findings').json()['total'] == 0
+
+
+def test_legacy_low_warning_is_protected_on_read_without_rewriting_history(client):
+    task_id = client.post('/api/v1/tasks/text', json={'text': EMAIL}).json()['task_id']
+    assert wait_task(client, task_id)['status'] == 'done'
+    db = get_database()
+    with db.write() as conn:
+        conn.execute('update findings set masked=? where task_id=?', ('[低危]' + EMAIL, task_id))
+        finding_id = conn.execute('select id from findings where task_id=?', (task_id,)).fetchone()[0]
+    for path in (f'/findings/{finding_id}', '/findings', f'/tasks/{task_id}/findings',
+                 f'/tasks/{task_id}/export', f'/tasks/{task_id}/export/privacy?format=json'):
+        assert EMAIL not in client.get('/api/v1' + path).text
+    with db.connect() as conn:
+        assert conn.execute('select masked from findings where id=?', (finding_id,)).fetchone()[0] == '[低危]' + EMAIL

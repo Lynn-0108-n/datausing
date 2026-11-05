@@ -195,6 +195,7 @@ async function runDetect() {
     detectSource.value = snapshot;
     fileLabel.value = "";
     file.value = null;
+    await syncSnapshotPreview();
     ElMessage.success(`检测完成 · ${countHits(response.findings)} 处敏感命中`);
   } catch (err) {
     detectError.value = safeError(err, "检测失败，请检查服务连接后重试。");
@@ -223,6 +224,7 @@ async function upload(fileEntry) {
     segmentPage.value = 1;
     detectSource.value = "";
     fileLabel.value = fileEntry.name;
+    await syncSnapshotPreview();
     ElMessage.success("文件解析并检测完成");
   } catch (err) {
     detectError.value = safeError(
@@ -302,6 +304,20 @@ const STRATEGY_FALLBACK = [
 ];
 const strategies = ref([]);
 const strategy = ref("partial");
+async function syncSnapshotPreview(snapshot = result.value, selected = strategy.value) {
+  if (!snapshot?.result_id) return;
+  const preview = await api.previewSnapshot(snapshot, selected);
+  if (result.value?.result_id !== snapshot.result_id || strategy.value !== selected) {
+    throw new Error('检测结果或策略已变化，请重试');
+  }
+  result.value = preview;
+}
+watch(strategy, () => {
+  if (!result.value?.result_id || loading.value || exportLoading.value) return;
+  syncSnapshotPreview().catch((err) => {
+    exportError.value = safeError(err, '策略预览失败，请重新检测');
+  });
+});
 
 const strategyOptions = computed(() =>
   strategies.value.length ? strategies.value : STRATEGY_FALLBACK,
@@ -352,7 +368,12 @@ async function runExport() {
   exportError.value = "";
   try {
     let name = "";
-    if (fileLabel.value && file.value) {
+    if (result.value.result_id) {
+      const snapshot = result.value;
+      const selected = strategy.value;
+      await syncSnapshotPreview(snapshot, selected);
+      name = await api.exportSnapshot(snapshot, selected, exportFmt.value, exportFallbackName.value);
+    } else if (fileLabel.value && file.value) {
       name = await api.exportDetectFile(
         file.value,
         {

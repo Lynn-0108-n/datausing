@@ -18,6 +18,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, Depends, FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -43,7 +44,8 @@ from .core.paths import frontend_dir, resource_root
 from .core.config import get_settings
 from .core.db import get_database
 from .plugins import load_plugins
-from .security import SecurityError, security_error_response
+from .security import SecurityError, security_error_response, validation_error_response
+from .identify.snapshots import get_snapshot_store
 from .traffic.live import get_live_manager
 
 # 自带单页控制台随包分发：开发态是 server/app/webui，打包后是解包目录下的 app/webui
@@ -71,10 +73,12 @@ FlowMask：网络与文档流量的分级脱敏与审计溯源系统（数据安
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """应用退出时停掉所有实时跟随线程，避免残留线程继续写库。"""
+    get_snapshot_store().start()
     try:
         yield
     finally:
         get_live_manager().stop_all()
+        get_snapshot_store().close()
 
 
 def create_app() -> FastAPI:
@@ -106,6 +110,7 @@ def create_app() -> FastAPI:
         ],
     )
     app.add_exception_handler(SecurityError, security_error_response)
+    app.add_exception_handler(RequestValidationError, validation_error_response)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),

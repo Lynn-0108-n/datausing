@@ -11,6 +11,11 @@ POLICY_VERSION = "protected-v1"
 logger = logging.getLogger(__name__)
 
 
+def safe_stored_mask(value: str) -> str:
+    """旧L1警示不是脱敏副本；查询/导出时遮蔽，不改写用户历史库。"""
+    return '[已屏蔽:历史低危副本]' if '[低危]' in value else value
+
+
 class SecurityError(Exception):
     def __init__(self, code: str, message: str, status_code: int = 422):
         self.code = code
@@ -24,6 +29,19 @@ async def security_error_response(_request, exc: SecurityError):
     logger.warning("%s error_id=%s", exc.code, exc.error_id)
     return JSONResponse(status_code=exc.status_code, content={
         "detail": exc.message, "code": exc.code, "error_id": exc.error_id,
+    })
+
+
+async def validation_error_response(_request, exc):
+    """Pydantic的input/ctx可能含整段原文，错误响应只保留字段位置和错误类型。"""
+    error_id = uuid.uuid4().hex
+    logger.warning('VALIDATION_FAILED error_id=%s', error_id)
+    return JSONResponse(status_code=422, content={
+        'code': 'VALIDATION_FAILED', 'error_id': error_id,
+        'detail': [{'loc': list(error['loc']), 'type': error['type'],
+                    'msg': ('正则表达式无效，请检查语法和捕获组'
+                            if error['loc'][-1:] == ('pattern',) else '请求参数无效')}
+                   for error in exc.errors()],
     })
 
 
@@ -51,7 +69,7 @@ def protected_text(text: str, finding, requested_level=None) -> str:
     from .identify.types import Level
 
     spans = protected_spans(text, finding.spans)
-    if not spans:
+    if not spans or finding.requires_full_mask:
         return '[已屏蔽:敏感信息]'  # 有类别证据但无精确位置时，不沿用可能含原值的副本
     high = finding.level == Level.HIGH or requested_level == Level.HIGH
     try:

@@ -20,7 +20,7 @@ from ..audit import append_entry_conn
 from ..core.db import Database, utcnow_iso
 from ..identify import DetectionPipeline, DetectOptions, Level
 from ..parsers.base import Document
-from ..security import POLICY_VERSION, SecurityError, protected_text
+from ..security import POLICY_VERSION, SecurityError, protected_text, safe_stored_mask
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,7 @@ def _hash(text: str) -> str:
 
 def _row_to_finding(row: Any) -> dict[str, Any]:
     item = dict(row)
+    item['masked'] = safe_stored_mask(item['masked'])
     item["degraded"] = bool(item["degraded"])
     try:
         item["types"] = [t for t in str(item["types"]).split(",") if t]

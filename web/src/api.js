@@ -228,6 +228,14 @@ export const api = {
   // 即时检测的脱敏文件导出（文本入口）：返回二进制附件并直接触发下载
   exportDetectText: (payload, fallbackName = "flowmask-masked.txt") =>
     downloadWithBody("/detect/export", jsonBody(payload), fallbackName),
+  previewSnapshot: (result, strategy) =>
+    request(`/detect/results/${encodeURIComponent(result.result_id)}/preview`, jsonBody({
+      strategy, policy_version: result.policy_version,
+    })),
+  exportSnapshot: (result, strategy, fmt, fallbackName = "flowmask-masked.txt") =>
+    downloadWithBody('/detect/export', jsonBody({
+      result_id: result.result_id, policy_version: result.policy_version, strategy, fmt,
+    }), fallbackName),
   // 文件入口：multipart，字段按契约平铺（strategy/fmt/enable_l2/enable_l3/enable_ner/enable_keywords）
   exportDetectFile: (file, opts = {}, fallbackName = "flowmask-masked.bin") => {
     const fd = new FormData();

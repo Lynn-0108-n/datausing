@@ -23,6 +23,7 @@ from ..parsers.base import Document, Segment
 from .l2 import SemanticClassifier, SemanticHit, build_semantic_classifier
 from .l3 import GuardClassifier, GuardVerdict, build_guard_classifier
 from .masking import mask
+from .rules import dedupe_overlaps
 from .ner import NerDetector, build_ner_detector, spans_to_hits
 from .normalize import map_hit_span, normalize_with_map
 from .scoring import analyze as analyze_l1
@@ -216,6 +217,7 @@ class SegmentFinding:
     reason: str | None = None
     # 命中区间（字符偏移 + 类别），供前端在原文上高亮；只有 L1 能给出精确区间
     spans: list[dict[str, object]] = field(default_factory=list)
+    requires_full_mask: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -235,6 +237,7 @@ class SegmentFinding:
             "degraded": self.degraded,
             "reason": self.reason,
             "spans": self.spans,
+            "requires_full_mask": self.requires_full_mask,
         }
 
 
@@ -349,6 +352,11 @@ class DetectionPipeline:
             direct=result.direct,
             degraded=result.degraded,
             reason=reason,
+            requires_full_mask=any(
+                evidence.get('type') in {entity.value for entity in EntityType}
+                or evidence.get('type') == 'l3_guard' and str(evidence.get('risk', '')).lower() == 'unsafe'
+                for evidence in result.extra_evidence
+            ),
             # 敏感词表命中不参与高亮：它指向类别词本身，不是需要高亮的敏感值
             spans=[
                 {
@@ -357,6 +365,7 @@ class DetectionPipeline:
                     "type": hit.type.value,
                     "label": entity_label(hit.type),
                     "rule": hit.rule,
+                    "coverage_types": list(hit.coverage_types),
                 }
                 for hit in result.hits
                 if not hit.rule.startswith("kw-")
@@ -383,9 +392,12 @@ class DetectionPipeline:
                 result.degraded = True
             if ner_hits:
                 merged = _merge_ner_hits(result.hits, ner_hits)
-                if len(merged) > len(result.hits):
+                if merged != result.hits:
+                    expanded = [(hit.start, hit.end) for hit in merged] != [
+                        (hit.start, hit.end) for hit in result.hits]
                     result = score(merged)
-                    chain.append("ner")
+                    if expanded:
+                        chain.append("ner")
 
         if options.enable_l2 and self.semantic is not None and self.semantic.available():
             # L2 只处理 L1 命中的样本：直达高危也要过一遍语义复核，
@@ -540,15 +552,9 @@ def _overlaps(hit: Hit, others: list[Hit]) -> bool:
 
 
 def _merge_ner_hits(l1_hits: list[Hit], ner_hits: list[Hit]) -> list[Hit]:
-    """把 NER 命中并入 L1：与已有命中重叠的一律丢弃（L1 更精确，先入为主）。
+    """把 NER 命中并入 L1：替换范围取覆盖并集，不能遗留粗区间的敏感尾部。
 
     这样"13800138000"既被手机号规则命中、又被 NER 当成数字片段时不会重复计数，
-    也不会因为 NER 的粗区间覆盖掉规则的精确区间（脱敏依赖精确区间）。
+    采用较强证据评分，并保留覆盖范围中的类别标记，供泛化策略保守处理。
     """
-    merged = list(l1_hits)
-    for hit in ner_hits:
-        if _overlaps(hit, merged):
-            continue
-        merged.append(hit)
-    merged.sort(key=lambda item: item.start)
-    return merged
+    return dedupe_overlaps(list(l1_hits) + list(ner_hits))
