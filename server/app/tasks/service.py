@@ -20,6 +20,7 @@ from ..audit import append_entry_conn
 from ..core.db import Database, utcnow_iso
 from ..identify import DetectionPipeline, DetectOptions, Level
 from ..parsers.base import Document
+from ..security import POLICY_VERSION, SecurityError, protected_text
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,8 @@ def create_task(
             "enable_l3": options.enable_l3,
             "mask_level": options.mask_level.value if options.mask_level else None,
             "min_level": options.min_level.value,
+            "storage_policy_version": POLICY_VERSION,
+            "storage_mask_floor": "L2",
         },
         ensure_ascii=False,
     )
@@ -106,14 +109,27 @@ def _execute(
     pipeline: DetectionPipeline,
 ) -> None:
     """后台执行体：任何异常都要落成 failed 状态，不让任务永远卡在 running。"""
+    failure_code = 'TASK_PERSISTENCE_FAILED'
     try:
         with db.write() as conn:
             conn.execute(
                 "UPDATE tasks SET status=? WHERE id=?",
                 (STATUS_RUNNING, task_id),
             )
+        failure_code = 'TASK_DETECTION_FAILED'
         report = pipeline.analyze_document(document, options)
 
+        # L1是本机预览语义，不能作为持久化的隐私保证。存储边界重新生成安全副本。
+        segments = {segment.path: segment for segment in document.segments}
+        if len(segments) != len(document.segments):
+            raise SecurityError('MASK_LOCATION_INVALID', '任务片段定位不一致')
+        for finding in report.all_findings or report.findings:
+            segment = segments.get(finding.path)
+            if segment is None or _hash(segment.text) != finding.original_hash:
+                raise SecurityError('MASK_LOCATION_INVALID', '任务结果与来源不一致')
+            finding.masked = protected_text(segment.text, finding, options.mask_level)
+
+        failure_code = 'TASK_PERSISTENCE_FAILED'
         with db.write() as conn:
             inserted: list[tuple[int, Any]] = []
             for finding in report.findings:
@@ -170,14 +186,17 @@ def _execute(
         # 审计链写入已并入上面的同一事务（见 append_entry_conn 调用），
         # 不再在事务外补写，避免「findings 已提交、审计失败后任务被改 failed」。
     except Exception as exc:  # noqa: BLE001 - 后台任务必须兜住所有异常
+        error = exc if isinstance(exc, SecurityError) else SecurityError(
+            failure_code, '任务执行失败，未保存原文', 503)
+        logger.warning('%s task_id=%s error_id=%s', error.code, task_id, error.error_id)
         try:
             with db.write() as conn:
                 conn.execute(
                     "UPDATE tasks SET status=?, finished_at=?, error=? WHERE id=?",
-                    (STATUS_FAILED, utcnow_iso(), f"{type(exc).__name__}: {exc}", task_id),
+                    (STATUS_FAILED, utcnow_iso(), f'{error.code}:{error.error_id}', task_id),
                 )
         except Exception:  # noqa: BLE001 - 兜底写库失败也不能让异常穿出 daemon 线程
-            logger.exception("任务 %s 标记 failed 失败", task_id)
+            logger.error('TASK_STATUS_WRITE_FAILED task_id=%s error_id=%s', task_id, error.error_id)
 
 
 def get_task(db: Database, task_id: str) -> dict[str, Any] | None:
