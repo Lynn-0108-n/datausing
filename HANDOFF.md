@@ -5,7 +5,7 @@
 本轮用户收窄的四项核心范围已实现、验证、逐单元提交：结构化导出残留、未授权动态SAFE/L1降级、任务L1原值持久化、检测/策略预览/导出快照一致。不是完成全部32项，也不是原计划第一批所有扩展工作都完成。
 
 - 分支：`codex/backend-p0`；基线`c7ba4c0`。当前改动全部留在该分支，未推送或发布。
-- Python一体机：0.26.1待发布，版本资源同步，未重新打包exe。Go生产版本与旧MeTD不变。
+- Python一体机：0.26.1本地exe已重新打包并通过6项实测，路径`server/dist_exe/FlowMask.exe`（54,034,236字节）；安装包未生成、未远程发布。Go生产版本与旧MeTD不变。
 - 交付：`docs/第一批P0修复交付-2026-11-05.md`；执行记录：`docs/第一批安全修复记录.md`。
 - 原始证据：`docs/后端业务全面审计-2026-11-05.md`；后续计划：`docs/superpowers/plans/2026-11-05-flowmask-backend.md`。
 
@@ -30,7 +30,7 @@
 - Node14 passed；Vite生产构建成功。
 - 真Edge+隔离FastAPI生产页面14 passed，包含规则停用后加密快照预览/下载逐字一致、八页、批量、审计、授权、流量示例、加密还原。仅原有loading用例注入一次422，其余业务走真实服务。
 - Go test/build/vet退出码0；回压三种CPU×100轮=300次通过，race同样300次且无race报告。
-- 真实模型权重/网卡持续采集/实际exe与安装包未验证。所有数据为合成样本，未读真实用户库。
+- exe启动、内置页面/词表、动态保护、结构化导出、规则漂移与加密快照、任务持久化共6项通过；真实模型权重/网卡持续采集/交互托盘与安装包未验证。所有数据为合成样本，未读真实用户库。
 - 受限Windows的Vite构建需要获准运行以解决Node realpath权限；后台测试服务须和浏览器在同一命令生命周期，单独启动会被环境清理。Go build模块stat缓存有权限警告但退出码0。
 
 ## 未完成与下一步
@@ -49,3 +49,5 @@
 - 直接相关识别保护：`server/app/identify/{rules,types,pipeline,masking}.py`
 - 测试：`server/tests/test_security_{boundaries,exports,persistence,snapshots}.py`、`web/test/api-snapshot.test.mjs`、`web/test/e2e/workspace.spec.js`、`internal/app/dlp_test.go`
 - 前端最小接入：`web/src/api.js`、`web/src/views/DetectView.vue`、`web/src/workspace.js`
+
+最新exe SHA256：`8806160CD7CC9D99C1F9EC3CC112EBF18E47AF8664D82AF2576184E5646DEDF5`。打包基于`e51afc1`，PyInstaller6.22.3，前端重新构建；详见交付文档第7节。
