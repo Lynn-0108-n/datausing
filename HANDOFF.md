@@ -1,4 +1,46 @@
-# FlowMask 前端重设计交接单 · 2026-11-05
+# FlowMask 后端业务审计交接单 · 2026-11-05
+
+## 当前状态（最新）
+
+已按用户要求完成先审查、后方案这一阶段：真实调用链审查、功能矩阵、32项问题与能力缺口、场景复现、四批计划和前端接口建议。**未修复业务代码，F01～F32均未关闭**。审查基线`73aaf10`。
+
+- 报告：`docs/后端业务全面审计-2026-11-05.md`
+- 计划：`docs/superpowers/plans/2026-11-05-flowmask-backend.md`
+- Python：625 passed、5 skipped、1现有弃用警告；Node：10 passed。
+- Go全套`go test ./...`单次通过，build/vet退出码0；`TestOnlineDLPCountsDroppedWhenQueueFull -count=20`失败，已复现时序假设，不能称验证全部稳定通过，更不能据此断言产品额外丢包。后续计划有独立测试修正项。
+- 新增合成探针已复现结构化导出残留、动态SAFE/L1覆盖、任务L1落原值、归一化/重叠漏检、规则漂移导出、流量URL元数据泄露、重组与live停止/失败等缺陷。真实模型/网卡/exe未验证。
+
+## 已定决策 —— 不要重新讨论这些
+
+1. 当前产品是本目录`datausing/`，不是旁边的旧版`FlowMask/`。正式前端`web/`，Python`server/`主服务，桌面入口`server/desktop.py`；旧Go/MeTD功能保留。
+2. 本次任务先全面审查输出方案，再分批完善。当前阶段完成的是审计交付；不要把报告中的方案写成已实现，不要一开始重做整个架构。
+3. 保留FastAPI/SQLite/Document/Segment与既有API；不引入分布式队列，不用Mock替代真实业务结果，不删除旧能力。
+4. 风险等级与掩码策略分离；原文不持久化；任务异常恢复不能靠暗存原文。旧库可能含历史L1原值，未经明确授权不清理/迁移真实用户内容。
+5. 第一批统一检测/风险/脱敏，同时补直接消费者的最小防泄露边界；第二批规则/任务；第三批审计/可信主体/统计；第四批批量最终联调/流量/其他能力。
+6. 不重启已完成的前端重设计。只在后端新契约必要时最小接入前端。
+7. 文档与AGENTS里的旧绝对路径已过时，本项目实际根目录为`D:/AAAdsh-allproject/flow work/datausing`。当前主干main，文档提交不升级产品版本。
+8. 多项问题已通过隔离合成数据复现；新线程先读报告的对应F项和计划，再把复现转为失败回归测试，不重走文件名猜能力的流程。
+
+## 下一步
+
+建议新线程从第一批任务1开始：结构化唯一定位、JSON数字值、CSV重名列、SQL混合值列上下文、安全格式回写。接着修归一化/重叠/PEM、引擎状态、最低策略和检测快照。每项先失败测试，再最小修改、回归、独立提交。
+
+注意：仅规则/选项指纹不能保证模型重推理一致；最终导出要消费不可变命中集。结果句柄的随机性、主体绑定、每次授权、TTL和条数/字节预算必须随首次实现一起完成。
+
+当前只有共享可选Bearer与自报operator，不能把白名单称为多角色强身份隔离；先补不可降级掩码，再按第三批完善本机能力模型。跨格式不支持必须明确拒绝，不能200返回原始内容。
+
+## 关键文件
+
+- 检测：`server/app/identify/{pipeline,rules,normalize,scoring,masking,l2,l3,ner}.py`
+- 解析/输出：`server/app/parsers/`、`server/app/tasks/{export,document_export}.py`
+- 任务/权限：`server/app/tasks/service.py`、`server/app/api/{deps,routes_tasks,routes_detect,routes_dynamic}.py`
+- 持久化/审计：`server/app/core/db.py`、`server/app/audit/chain.py`、`server/app/privacy.py`
+- 流量：`server/app/traffic/`、`server/app/api/routes_traffic.py`；Go `cmd/flowmask/`、`internal/dlp/`、`internal/app/`
+- 既有验证：`server/tests/`、`web/test/`、`internal/app/dlp_test.go`
+
+---
+
+# 历史前端重设计交接（保留） · 2026-11-05
 
 ## 当前状态
 
