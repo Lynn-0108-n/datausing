@@ -1,16 +1,24 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
-import { ElMessage } from "element-plus";
-import { api, LEVEL_COLORS, LEVEL_LABELS } from "../api";
-import { maskedDocumentText, renderHighlight } from "../highlight";
+import { computed, onMounted, ref, watch } from "vue";
+import { ElMessage, ElMessageBox } from "element-plus";
+import { api, LEVEL_LABELS } from "../api";
+import { escapeHtml, maskedDocumentText, renderHighlight } from "../highlight";
+import { countHits, safeError, sourceSegments } from "../workspace";
+import PageHeader from "../components/PageHeader.vue";
+import AppIcon from "../components/AppIcon.vue";
+import RiskIndicator from "../components/RiskIndicator.vue";
+import EmptyState from "../components/EmptyState.vue";
+import AdvancedOptions from "../components/AdvancedOptions.vue";
+import EditorPanel from "../components/EditorPanel.vue";
 
 const SAMPLE = `客户张三，手机 13800138000，身份证 11010519491231002X，收货地址：福建省福州市鼓楼区五四路 100 号。`;
 // 自由文本样例：没有字段名/关键词，L1 规则抓不到人名和地名，只有 NER 能补
-const NER_SAMPLE = "张三昨天从福州赶过来，和李四在厦门大学碰了面，商量下个季度的采购方案。";
+const NER_SAMPLE =
+  "张三昨天从福州赶过来，和李四在厦门大学碰了面，商量下个季度的采购方案。";
 
-const text = ref(SAMPLE);
+const text = ref("");
 // 本次结果对应的原文快照：上传文件检测时没有原文，不能拿输入框内容去套文件的高亮区间
-const detectSource = ref(SAMPLE);
+const detectSource = ref("");
 const fileLabel = ref("");
 const maskLevel = ref("");
 const minLevel = ref("SAFE");
@@ -22,6 +30,132 @@ const nerBackend = ref("");
 const loading = ref(false);
 const result = ref(null);
 const file = ref(null);
+const detectError = ref("");
+const originalEditor = ref(null);
+const maskedEditor = ref(null);
+const detail = ref(null);
+const detailOpen = ref(false);
+const resultPage = ref(1);
+const levelFilter = ref("");
+const optionsSnapshot = ref(null);
+const sourceChanged = computed(
+  () => result.value && !fileLabel.value && text.value !== detectSource.value,
+);
+const hitCount = computed(() => countHits(findings.value));
+const filteredFindings = computed(() =>
+  findings.value.filter(
+    (row) => !levelFilter.value || row.level === levelFilter.value,
+  ),
+);
+const pagedFindings = computed(() =>
+  filteredFindings.value.slice(
+    (resultPage.value - 1) * 50,
+    resultPage.value * 50,
+  ),
+);
+watch(levelFilter, () => {
+  resultPage.value = 1;
+});
+const segmentPage = ref(1);
+const sourceIndex = computed(() =>
+  sourceSegments(detectSource.value, result.value?.content_type),
+);
+const segmentList = computed(
+  () => result.value?.masked_document?.segments || [],
+);
+const isStructured = computed(
+  () => result.value && result.value.content_type !== "text",
+);
+const editorSegments = computed(() =>
+  segmentList.value.slice((segmentPage.value - 1) * 50, segmentPage.value * 50),
+);
+function rowHtml(segment) {
+  const source = sourceIndex.value.get(segment.path);
+  if (source === undefined) return escapeHtml("原文未提供");
+  const index = findings.value.findIndex((row) => row.path === segment.path);
+  const row = findings.value[index];
+  return renderHighlight(
+    source,
+    (row?.spans || []).map((span) => ({
+      ...span,
+      level: row.level,
+      finding: index,
+    })),
+  );
+}
+const originalDisplay = computed(() => {
+  if (!result.value || !detectSource.value) return "";
+  if (!isStructured.value) return detectSource.value;
+  return editorSegments.value
+    .map(
+      (segment) =>
+        `${segment.path}\n${sourceIndex.value.get(segment.path) ?? "原文未提供"}\n`,
+    )
+    .join("\n");
+});
+const originalDisplayHtml = computed(() => {
+  if (!isStructured.value)
+    return renderHighlight(
+      detectSource.value,
+      findings.value.flatMap((row, i) =>
+        (row.spans || []).map((span) => ({
+          ...span,
+          level: row.level,
+          finding: i,
+        })),
+      ),
+    );
+  return editorSegments.value
+    .map((segment) => `${escapeHtml(segment.path)}\n${rowHtml(segment)}\n`)
+    .join("\n");
+});
+const maskedDisplay = computed(() =>
+  isStructured.value
+    ? editorSegments.value
+        .map((segment) => `${segment.path}\n${segment.masked}\n`)
+        .join("\n")
+    : maskedText.value,
+);
+function showDetail(row) {
+  detail.value = row;
+  detailOpen.value = true;
+}
+function showHit(index) {
+  if (findings.value[index]) showDetail(findings.value[index]);
+}
+async function copyMasked() {
+  try {
+    await navigator.clipboard.writeText(maskedText.value);
+    ElMessage.success("脱敏副本已复制");
+  } catch {
+    ElMessage.warning("剪贴板不可用，请在脱敏编辑器中选择并复制。");
+  }
+}
+async function clearInput() {
+  if (!text.value && !result.value && !fileLabel.value) return;
+  try {
+    await ElMessageBox.confirm(
+      "清空输入和当前检测结果？此操作不会删除已保存的任务或审计记录。",
+      "清空工作区",
+      { confirmButtonText: "清空", cancelButtonText: "保留", type: "warning" },
+    );
+  } catch {
+    return;
+  }
+  text.value = "";
+  result.value = null;
+  detectSource.value = "";
+  file.value = null;
+  fileLabel.value = "";
+  detectError.value = "";
+  detail.value = null;
+  detailOpen.value = false;
+  decryptInput.value = "";
+  decryptResult.value = null;
+}
+function sample() {
+  text.value = SAMPLE;
+}
 
 const nerTitle = computed(() =>
   nerAvailable.value
@@ -31,82 +165,77 @@ const nerTitle = computed(() =>
 
 const findings = computed(() => (result.value ? result.value.findings : []));
 const byLevel = computed(() => (result.value ? result.value.by_level : {}));
-const originalHtml = computed(() => {
-  if (!result.value) return "";
-  if (!detectSource.value) return "（文件检测不展示原文：服务端不落原文，右侧为脱敏副本）";
-  return renderHighlight(detectSource.value, flattenSpans());
-});
-const maskedText = computed(() => maskedDocumentText(result.value?.masked_document));
-const maskedHtml = computed(() => escape(maskedText.value));
-
-function escape(value) {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function flattenSpans() {
-  const spans = [];
-  for (const item of findings.value) {
-    for (const span of item.spans || []) spans.push(span);
-  }
-  return spans;
-}
+const maskedText = computed(() =>
+  maskedDocumentText(result.value?.masked_document),
+);
 
 async function runDetect() {
+  if (loading.value) return;
   if (!text.value.trim()) {
     ElMessage.warning("先输入要检测的文本");
     return;
   }
   loading.value = true;
+  detectError.value = "";
   try {
     const snapshot = text.value;
-    result.value = await api.detectText({
+    const options = {
       text: snapshot,
       enable_l2: enableL2.value,
       enable_l3: enableL3.value,
       enable_ner: enableNer.value,
       mask_level: maskLevel.value || null,
       min_level: minLevel.value,
-    });
+    };
+    const response = await api.detectText(options);
+    result.value = response;
+    optionsSnapshot.value = options;
+    resultPage.value = 1;
+    segmentPage.value = 1;
     detectSource.value = snapshot;
     fileLabel.value = "";
+    file.value = null;
+    ElMessage.success(`检测完成 · ${countHits(response.findings)} 处敏感命中`);
   } catch (err) {
-    ElMessage.error(`检测失败：${err}`);
+    detectError.value = safeError(err, "检测失败，请检查服务连接后重试。");
   } finally {
     loading.value = false;
   }
 }
 
 async function upload(fileEntry) {
-  if (!fileEntry) return;
+  if (!fileEntry || loading.value) return;
   loading.value = true;
+  detectError.value = "";
   try {
-    result.value = await api.detectFile(fileEntry, {
+    const options = {
       enableL2: enableL2.value,
       enableL3: enableL3.value,
       enableNer: enableNer.value,
       maskLevel: maskLevel.value || "",
       minLevel: minLevel.value,
-    });
+    };
+    const response = await api.detectFile(fileEntry, options);
+    result.value = response;
+    file.value = fileEntry;
+    optionsSnapshot.value = options;
+    resultPage.value = 1;
+    segmentPage.value = 1;
     detectSource.value = "";
     fileLabel.value = fileEntry.name;
     ElMessage.success("文件解析并检测完成");
   } catch (err) {
-    ElMessage.error(`上传失败：${err}`);
+    detectError.value = safeError(
+      err,
+      "文件检测失败，请检查格式与服务连接后重试。",
+    );
   } finally {
     loading.value = false;
   }
 }
 
 function onFileChange(uploadFile) {
-  file.value = uploadFile.raw;
   upload(uploadFile.raw);
-}
-
-function levelChip(level) {
-  return { background: LEVEL_COLORS[level] || "#64748b" };
 }
 
 // ---------------------------------------------------------------------------
@@ -139,19 +268,48 @@ function clearScenario() {
 // 脱敏策略：导出与「还原加密内容」共用，服务端不可用时退化为内置常用策略
 // ---------------------------------------------------------------------------
 const STRATEGY_FALLBACK = [
-  { key: "block", label: "整段屏蔽", description: "敏感片段整体替换为占位符，信息全丢，不可逆。" },
-  { key: "partial", label: "部分遮蔽", description: "只保留首尾少量字符，中间打码，不可逆。" },
-  { key: "hash", label: "哈希", description: "替换为加盐摘要，可关联比对，不可逆。" },
-  { key: "generalize", label: "泛化", description: "按类别泛化（如精确值变区间），不可逆。" },
-  { key: "pseudonym", label: "假名化", description: "映射为稳定的假名/假值，不可逆。" },
-  { key: "encrypt", label: "加密", description: "替换为本机密钥加密的 enc: 密文，可在本机还原。" },
+  {
+    key: "block",
+    label: "整段屏蔽",
+    description: "敏感片段整体替换为占位符，信息全丢，不可逆。",
+  },
+  {
+    key: "partial",
+    label: "部分遮蔽",
+    description: "只保留首尾少量字符，中间打码，不可逆。",
+  },
+  {
+    key: "hash",
+    label: "哈希",
+    description: "替换为加盐摘要，可关联比对，不可逆。",
+  },
+  {
+    key: "generalize",
+    label: "泛化",
+    description: "按类别泛化（如精确值变区间），不可逆。",
+  },
+  {
+    key: "pseudonym",
+    label: "假名化",
+    description: "映射为稳定的假名/假值，不可逆。",
+  },
+  {
+    key: "encrypt",
+    reversible: true,
+    label: "加密",
+    description: "替换为本机密钥加密的 enc: 密文，可在本机还原。",
+  },
 ];
 const strategies = ref([]);
 const strategy = ref("partial");
 
-const strategyOptions = computed(() => (strategies.value.length ? strategies.value : STRATEGY_FALLBACK));
+const strategyOptions = computed(() =>
+  strategies.value.length ? strategies.value : STRATEGY_FALLBACK,
+);
 const strategyHint = computed(() => {
-  const found = strategyOptions.value.find((item) => item.key === strategy.value);
+  const found = strategyOptions.value.find(
+    (item) => item.key === strategy.value,
+  );
   if (!found) return "";
   const reversible = found.reversible ? "（可还原）" : "（不可逆）";
   return `${found.description || ""}${reversible}`;
@@ -174,12 +332,17 @@ const exportError = ref("");
 
 const fmtOptions = computed(() => (fileLabel.value ? FILE_FMTS : TEXT_FMTS));
 const exportFallbackName = computed(() => {
-  const fmt = exportFmt.value === "auto" ? (fileLabel.value ? "bin" : "txt") : exportFmt.value;
+  const fmt =
+    exportFmt.value === "auto"
+      ? fileLabel.value
+        ? "bin"
+        : "txt"
+      : exportFmt.value;
   return `flowmask-masked.${fmt}`;
 });
 
 async function runExport() {
-  if (!file && !detectSource.value.trim()) {
+  if (!result.value || (!file.value && !detectSource.value.trim())) {
     exportError.value = "先检测一段文本或上传一个文件，再导出脱敏结果。";
     return;
   }
@@ -195,9 +358,13 @@ async function runExport() {
         {
           strategy: strategy.value,
           fmt: exportFmt.value,
-          enableL2: enableL2.value,
-          enableL3: enableL3.value,
-          enableNer: enableNer.value,
+          enableL2:
+            optionsSnapshot.value?.enableL2 ?? optionsSnapshot.value?.enable_l2,
+          enableL3:
+            optionsSnapshot.value?.enableL3 ?? optionsSnapshot.value?.enable_l3,
+          enableNer:
+            optionsSnapshot.value?.enableNer ??
+            optionsSnapshot.value?.enable_ner,
         },
         exportFallbackName.value,
       );
@@ -208,17 +375,17 @@ async function runExport() {
           content_type: (result.value && result.value.content_type) || "text",
           strategy: strategy.value,
           fmt: exportFmt.value,
-          enable_l2: enableL2.value,
-          enable_l3: enableL3.value,
-          enable_ner: enableNer.value,
-          min_level: minLevel.value,
+          enable_l2: optionsSnapshot.value?.enable_l2,
+          enable_l3: optionsSnapshot.value?.enable_l3,
+          enable_ner: optionsSnapshot.value?.enable_ner,
+          min_level: optionsSnapshot.value?.min_level || "SAFE",
         },
         exportFallbackName.value,
       );
     }
     ElMessage.success(`已导出：${name}`);
   } catch (err) {
-    exportError.value = `导出失败：${err}`;
+    exportError.value = safeError(err, "导出失败，请检查格式和服务状态。");
   } finally {
     exportLoading.value = false;
   }
@@ -251,7 +418,7 @@ async function runDecrypt() {
     decryptResult.value = await api.decryptText(decryptInput.value);
   } catch (err) {
     decryptResult.value = null;
-    decryptError.value = `还原失败：${err}`;
+    decryptError.value = safeError(err, "还原失败，请检查密文及本机密钥。");
   } finally {
     decryptLoading.value = false;
   }
@@ -295,7 +462,9 @@ async function runSuggest() {
   suggestError.value = "";
   try {
     // fields 只传类别名，不传真实值；原文一律不上送
-    const fields = [...new Set(findings.value.flatMap((item) => item.types || []))].slice(0, 32);
+    const fields = [
+      ...new Set(findings.value.flatMap((item) => item.types || [])),
+    ].slice(0, 32);
     suggestResult.value = await api.suggestMasking({
       scenario: suggestForm.value.scenario || null,
       content_type: (result.value && result.value.content_type) || "text",
@@ -306,7 +475,7 @@ async function runSuggest() {
     });
   } catch (err) {
     suggestResult.value = null;
-    suggestError.value = `推荐失败：${err}`;
+    suggestError.value = safeError(err, "推荐暂时不可用，请稍后重试。");
   } finally {
     suggestLoading.value = false;
   }
@@ -322,7 +491,7 @@ function applySuggestion() {
   enableL3.value = Boolean(plan.enable_l3);
   enableNer.value = Boolean(plan.enable_ner) && nerAvailable.value;
   suggestOpen.value = false;
-  ElMessage.success("已应用到当前设置（导出时按这个策略生成脱敏文件）");
+  ElMessage.success("已更新检测配置与导出策略；重新检测可更新预览。");
 }
 
 onMounted(async () => {
@@ -350,157 +519,409 @@ onMounted(async () => {
   }
   // 打开即跑一遍示例：答辩/演示时页面一落地就有内容
   // ?ner=1：直接演示自由文本模式（NER 补出人名/地名）
-  const wantNer = new URLSearchParams(window.location.search).get("ner") === "1";
+  const wantNer =
+    new URLSearchParams(window.location.search).get("ner") === "1";
   if (wantNer && nerAvailable.value) {
     enableNer.value = true;
     text.value = NER_SAMPLE;
   }
-  runDetect();
+  if (
+    new URLSearchParams(window.location.search).get("demo") === "1" ||
+    wantNer
+  ) {
+    if (!text.value) text.value = SAMPLE;
+    runDetect();
+  }
 });
 </script>
 
 <template>
-  <div class="panel">
-    <div class="panel-title">
-      内容检测（文本 / JSON / CSV / SQL 自动识别）
-      <span class="hint">命中处黄色高亮，右侧是可直接写库/导出的脱敏副本</span>
-    </div>
-    <div class="toolbar" style="margin-top: 0">
-      <el-select
-        v-model="scenarioKey"
-        placeholder="场景模板（可选，选中即套用推荐配置）"
-        clearable
-        style="width: 260px"
-        @change="applyScenario"
-        @clear="clearScenario"
+  <div class="detect-workspace">
+    <PageHeader
+      title="实时检测"
+      description="识别敏感信息，审查脱敏结果，让每一次数据流转都更可控。"
+      index="DETECTION"
+    >
+      <el-button :disabled="loading" @click="sample"
+        ><AppIcon name="file" :size="16" />载入示例</el-button
       >
-        <el-option
-          v-for="item in scenarios"
-          :key="item.key"
-          :label="item.label"
-          :value="item.key"
-        />
-      </el-select>
-      <el-tag v-if="activeScenario" size="small" type="info">
-        {{ activeScenario.description }}
-      </el-tag>
-      <span v-if="activeScenario && activeScenario.retention" class="hint">
-        数据保留：{{ activeScenario.retention }}
-      </span>
-      <span v-else-if="!scenarios.length" class="hint">未加载到场景模板时按页面默认配置检测</span>
+    </PageHeader>
+    <div class="workflow" aria-label="检测工作流">
+      <span :class="{ current: !result }"><b>01</b>输入数据</span
+      ><AppIcon name="right" :size="12" /><span :class="{ current: loading }"
+        ><b>02</b>配置与检测</span
+      ><AppIcon name="right" :size="12" /><span
+        :class="{ current: result && !loading }"
+        ><b>03</b>审查结果</span
+      ><AppIcon name="right" :size="12" /><span><b>04</b>导出副本</span>
     </div>
-    <el-input v-model="text" type="textarea" :rows="5" placeholder="粘贴文本，或点击下方上传文件" />
-    <div class="toolbar">
-      <el-select v-model="maskLevel" placeholder="脱敏级别（按实际）" style="width: 170px">
-        <el-option label="按实际级别" value="" />
-        <el-option label="强制 L3" value="L3" />
-        <el-option label="强制 L2" value="L2" />
-        <el-option label="强制 L1" value="L1" />
-      </el-select>
-      <el-select v-model="minLevel" style="width: 150px">
-        <el-option label="只显示 ≥ SAFE" value="SAFE" />
-        <el-option label="只显示 ≥ L1" value="L1" />
-        <el-option label="只显示 ≥ L2" value="L2" />
-        <el-option label="只显示 ≥ L3" value="L3" />
-      </el-select>
-      <el-checkbox v-model="enableL2">L2 语义</el-checkbox>
-      <el-checkbox v-model="enableL3">L3 大模型</el-checkbox>
-      <el-checkbox v-model="enableNer" :disabled="!nerAvailable" :title="nerTitle">
-        自由文本 NER{{ nerAvailable ? "（" + (nerBackend || "已启用") + "）" : "（未启用）" }}
-      </el-checkbox>
-      <el-tag v-if="nerAvailable" size="small" :type="enableNer ? 'success' : 'info'">
-        {{ enableNer ? "NER 已开启" : "NER 已关闭" }}
-      </el-tag>
-      <el-button type="primary" :loading="loading" @click="runDetect">检测</el-button>
-      <el-upload
-        :auto-upload="false"
-        :show-file-list="false"
-        :on-change="onFileChange"
-        accept=".txt,.log,.md,.json,.csv,.tsv,.sql,.docx,.pdf,.xlsx"
+    <section class="panel input-workspace" :aria-busy="loading">
+      <header class="input-workspace-head">
+        <span
+          ><AppIcon name="terminal" :size="17" />输入工作区<small
+            >TEXT / JSON / CSV / SQL · AUTO</small
+          ></span
+        >
+        <div class="input-actions">
+          <el-upload
+            :auto-upload="false"
+            :show-file-list="false"
+            :on-change="onFileChange"
+            :disabled="loading"
+            accept=".txt,.log,.md,.json,.csv,.tsv,.sql,.docx,.pdf,.xlsx,.png,.jpg,.jpeg,.bmp,.webp"
+            ><el-button size="small" :disabled="loading"
+              ><AppIcon name="upload" :size="15" />上传文件</el-button
+            ></el-upload
+          ><button
+            class="icon-button"
+            aria-label="清空工作区"
+            title="清空输入与结果"
+            :disabled="loading"
+            @click="clearInput"
+          >
+            <AppIcon name="trash" :size="16" />
+          </button>
+        </div>
+      </header>
+      <el-input
+        v-model="text"
+        type="textarea"
+        :rows="4"
+        :disabled="loading"
+        maxlength="200000"
+        aria-label="待检测文本"
+        placeholder="粘贴待检测的文本、JSON、CSV 或 SQL…
+也可以上传 Word、Excel、PDF 等文件进行检测。"
+        @keydown.ctrl.enter.prevent="runDetect"
+        @keydown.meta.enter.prevent="runDetect"
+      />
+      <div class="input-workspace-bottom">
+        <div class="input-state" aria-live="polite">
+          <span>{{ text.length.toLocaleString() }} / 200,000 字符</span
+          ><span v-if="loading">检测中…</span
+          ><span v-else-if="fileLabel"
+            ><AppIcon name="file" :size="12" /> {{ fileLabel }}</span
+          ><i v-else>{{ text.trim() ? "已就绪" : "等待输入" }}</i>
+        </div>
+        <div class="toolbar">
+          <el-select
+            v-model="scenarioKey"
+            aria-label="场景模板"
+            placeholder="场景模板 · 可选"
+            clearable
+            :disabled="loading"
+            @change="applyScenario"
+            @clear="clearScenario"
+            ><el-option
+              v-for="item in scenarios"
+              :key="item.key"
+              :label="item.label"
+              :value="item.key" /></el-select
+          ><el-button
+            type="primary"
+            :loading="loading"
+            :disabled="!text.trim() || loading"
+            @click="runDetect"
+            ><AppIcon v-if="!loading" name="play" :size="15" />{{
+              loading ? "正在检测" : "开始检测"
+            }}<kbd v-if="!loading">Ctrl ↵</kbd></el-button
+          >
+        </div>
+      </div>
+      <AdvancedOptions
+        ><label class="field"
+          >脱敏级别<el-select
+            v-model="maskLevel"
+            aria-label="脱敏级别"
+            :disabled="loading"
+            ><el-option label="按实际级别" value="" /><el-option
+              v-for="level in ['L3', 'L2', 'L1']"
+              :key="level"
+              :label="`强制 ${level}`"
+              :value="level" /></el-select></label
+        ><label class="field"
+          >结果最低级别<el-select
+            v-model="minLevel"
+            aria-label="结果最低级别"
+            :disabled="loading"
+            ><el-option
+              v-for="level in ['SAFE', 'L1', 'L2', 'L3']"
+              :key="level"
+              :label="`显示 ≥ ${level}`"
+              :value="level" /></el-select></label
+        ><el-checkbox v-model="enableL2" :disabled="loading"
+          >请求 L2 语义</el-checkbox
+        ><el-checkbox v-model="enableL3" :disabled="loading"
+          >请求 L3 复核</el-checkbox
+        ><el-checkbox
+          v-model="enableNer"
+          :disabled="!nerAvailable || loading"
+          :title="nerTitle"
+          >自由文本 NER{{ nerAvailable ? "" : "（未就绪）" }}</el-checkbox
+        >
+        <div class="hint" style="width: 100%">
+          L2 / L3 也可能由服务端默认开启，实际使用以结果模型链为准。NER：{{
+            nerAvailable ? nerBackend || "已就绪" : "服务端未启用"
+          }}。
+        </div>
+        <div v-if="activeScenario" class="hint">
+          {{ activeScenario.description }} · 数据保留：{{
+            activeScenario.retention || "以服务端策略为准"
+          }}
+        </div></AdvancedOptions
       >
-        <el-button>上传文件</el-button>
-      </el-upload>
-      <el-button @click="text = SAMPLE">恢复示例</el-button>
+    </section>
+    <el-alert
+      v-if="detectError"
+      :title="detectError"
+      type="error"
+      show-icon
+      :closable="false"
+      class="detect-error"
+    />
+    <div v-if="sourceChanged" class="inline-notice warning">
+      <AppIcon
+        name="info"
+        :size="16"
+      />输入已修改。下方对照和导出仍对应上次检测快照，请重新检测以更新结果。
     </div>
-  </div>
-
-  <div class="panel">
-    <div class="panel-title">
-      左右对照
-      <span class="hint" v-if="result">
-        {{ result.content_type }} · {{ result.segments }} 个片段 · 耗时 {{ result.duration_ms }}ms
-        <template v-if="fileLabel"> · {{ fileLabel }}</template>
-        <template v-if="result.degraded"> · 已降级</template>
-      </span>
+    <div v-if="result?.degraded" class="inline-notice warning" role="status">
+      <AppIcon
+        name="warning"
+        :size="16"
+      />本次检测发生降级，请检查明细中的实际模型链与降级说明。
     </div>
-    <div class="compare">
-      <div class="pane">
-        <div class="pane-head">原文（命中处高亮；悬停看类别与规则）</div>
-        <div class="pane-body" v-html="originalHtml"></div>
-      </div>
-      <div class="pane">
-        <div class="pane-head">脱敏副本（写库/导出用的就是它）</div>
-        <div class="pane-body" v-html="maskedHtml"></div>
-      </div>
-    </div>
-    <div class="legend">
+    <div class="panel-title result-title">
       <span
+        >脱敏对照
+        <span class="hint" style="margin-left: 10px">REVIEW</span></span
+      ><span class="hint" aria-live="polite">{{
+        result
+          ? `${result.content_type.toUpperCase()} · ${result.segments} 个片段 · ${result.duration_ms} ms`
+          : "等待检测结果"
+      }}</span>
+    </div>
+    <div class="risk-summary" aria-label="风险摘要" aria-live="polite">
+      <span
+        ><strong>{{ result ? hitCount : "—" }}</strong
+        >敏感命中</span
+      ><span class="tool-divider" /><RiskIndicator
         v-for="level in ['L3', 'L2', 'L1', 'SAFE']"
         :key="level"
-        class="chip"
-        :style="levelChip(level)"
+        :level="level"
+        :count="result ? byLevel[level] || 0 : '—'"
+      /><span class="summary-caption"
+        >分级计数按检测片段统计{{
+          (optionsSnapshot?.min_level &&
+            optionsSnapshot.min_level !== "SAFE") ||
+          (optionsSnapshot?.minLevel && optionsSnapshot.minLevel !== "SAFE")
+            ? " · 已筛选最低级别"
+            : ""
+        }}</span
       >
-        {{ level }} {{ LEVEL_LABELS[level] }} {{ byLevel[level] || 0 }}
-      </span>
     </div>
-
-    <!-- 导出 / 还原 / AI 推荐：都作用于当前这次检测结果 -->
-    <div v-if="result" class="toolbar">
-      <el-select v-model="strategy" placeholder="脱敏策略" style="width: 170px">
-        <el-option
+    <div class="compare" :aria-busy="loading">
+      <EditorPanel
+        ref="originalEditor"
+        title="原始内容"
+        subtitle="ORIGINAL"
+        :text="originalDisplay"
+        :html="originalDisplayHtml"
+        @scroll="(ratio, x) => maskedEditor?.setScroll(ratio, x)"
+        @hit="showHit"
+        ><template v-if="fileLabel"
+          ><AppIcon name="dynamic" :size="26" /><span
+            >文件检测不回传原文<br />右侧展示服务端返回的脱敏副本。</span
+          ></template
+        ></EditorPanel
+      >
+      <EditorPanel
+        ref="maskedEditor"
+        title="脱敏副本"
+        subtitle="MASKED"
+        :text="maskedDisplay"
+        :html="escapeHtml(maskedDisplay)"
+        masked
+        @scroll="(ratio, x) => originalEditor?.setScroll(ratio, x)"
+        ><template #actions
+          ><button
+            class="icon-button"
+            aria-label="复制脱敏副本"
+            title="复制脱敏副本"
+            :disabled="!result"
+            @click="copyMasked"
+          >
+            <AppIcon name="copy" :size="15" /></button></template
+      ></EditorPanel>
+    </div>
+    <div v-if="isStructured && segmentList.length > 50" class="table-footer">
+      <span>按路径对齐 · 每页 50 个片段，复制与导出包含完整副本</span
+      ><el-pagination
+        v-model:current-page="segmentPage"
+        :page-size="50"
+        :total="segmentList.length"
+        layout="prev, pager, next"
+        size="small"
+      />
+    </div>
+    <div v-if="result" class="export-bar">
+      <label>导出策略</label
+      ><el-select v-model="strategy" aria-label="导出脱敏策略"
+        ><el-option
           v-for="item in strategyOptions"
           :key="item.key"
           :label="item.label"
-          :value="item.key"
-        />
-      </el-select>
-      <el-select v-model="exportFmt" style="width: 140px">
-        <el-option
+          :value="item.key" /></el-select
+      ><el-select v-model="exportFmt" aria-label="导出文件格式"
+        ><el-option
           v-for="fmt in fmtOptions"
           :key="fmt"
           :label="FMT_LABELS[fmt] || fmt"
-          :value="fmt"
+          :value="fmt" /></el-select
+      ><el-button @click="openSuggest">AI 推荐方案</el-button
+      ><el-button v-if="strategy === 'encrypt'" @click="openDecrypt"
+        >还原加密内容</el-button
+      ><el-button
+        class="export-primary"
+        type="primary"
+        :loading="exportLoading"
+        :disabled="loading"
+        @click="runExport"
+        ><AppIcon name="download" :size="15" />导出脱敏文件</el-button
+      >
+      <div class="hint" style="width: 100%">
+        {{ strategyHint }} ·
+        导出按所选策略重新生成，与上方分级预览可能不同。即时检测与导出不落库，留痕请使用「任务与审计」。
+      </div>
+      <div v-if="exportError" class="hint error-text" role="alert">
+        {{ exportError }}
+      </div>
+    </div>
+    <section class="panel details-panel">
+      <div class="panel-title">
+        <span
+          >检测结果明细
+          <span class="hint" style="margin-left: 8px"
+            >{{ findings.length }} 个片段</span
+          ></span
+        ><el-select
+          v-model="levelFilter"
+          aria-label="明细风险筛选"
+          placeholder="所有级别"
+          clearable
+          size="small"
+          style="width: 132px"
+          ><el-option
+            v-for="level in ['L3', 'L2', 'L1', 'SAFE']"
+            :key="level"
+            :label="`${level} ${LEVEL_LABELS[level]}`"
+            :value="level"
+        /></el-select>
+      </div>
+      <el-table
+        v-if="pagedFindings.length"
+        :data="pagedFindings"
+        :max-height="380"
+        @row-dblclick="showDetail"
+        ><el-table-column
+          prop="path"
+          label="位置"
+          min-width="140"
+          show-overflow-tooltip
+        /><el-table-column label="风险等级" width="114"
+          ><template #default="{ row }"
+            ><RiskIndicator :level="row.level" /></template></el-table-column
+        ><el-table-column
+          prop="score"
+          label="评分"
+          width="70"
+          align="right"
+        /><el-table-column
+          label="敏感类别"
+          min-width="140"
+          show-overflow-tooltip
+          ><template #default="{ row }">{{
+            (row.types || []).join(" / ") || "—"
+          }}</template></el-table-column
+        ><el-table-column
+          prop="hits"
+          label="命中"
+          width="60"
+          align="right"
+        /><el-table-column
+          prop="model_chain"
+          label="模型链"
+          width="105"
+          show-overflow-tooltip
+        /><el-table-column
+          prop="masked"
+          label="脱敏副本"
+          min-width="180"
+          show-overflow-tooltip
+        /><el-table-column label="操作" width="62" fixed="right"
+          ><template #default="{ row }"
+            ><el-button link type="primary" @click="showDetail(row)"
+              >详情</el-button
+            ></template
+          ></el-table-column
+        ></el-table
+      >
+      <EmptyState
+        v-else
+        :title="result ? '没有符合筛选条件的结果' : '等待第一次检测'"
+        :description="
+          result
+            ? '可调整风险筛选或最低返回级别后重试。'
+            : '粘贴文本或上传文件，然后开始检测。'
+        "
+      />
+      <div v-if="findings.length" class="table-footer">
+        <span>点击高亮或「详情」查看规则、区间与判断依据</span
+        ><el-pagination
+          v-model:current-page="resultPage"
+          :page-size="50"
+          :total="filteredFindings.length"
+          layout="total, prev, pager, next"
+          size="small"
         />
-      </el-select>
-      <el-button type="primary" :loading="exportLoading" @click="runExport">导出脱敏文件</el-button>
-      <el-button v-if="strategy === 'encrypt'" @click="openDecrypt">还原加密内容</el-button>
-      <el-button @click="openSuggest">AI 推荐方案</el-button>
-    </div>
-    <div v-if="strategyHint" class="hint-line">当前策略：{{ strategyHint }}</div>
-    <div v-if="exportError" class="hint-line" style="color: #dc2626">{{ exportError }}</div>
-    <div v-if="fileLabel" class="hint-line">
-      当前是文件检测：导出的格式按所选处理，选「跟随原格式」时尽量还原为原文件类型。
-    </div>
-  </div>
-
-  <div class="panel">
-    <div class="panel-title">检测结果明细</div>
-    <el-table v-if="findings.length" :data="findings" stripe>
-      <el-table-column prop="path" label="位置" width="160" />
-      <el-table-column label="级别" width="90">
-        <template #default="scope">
-          <span class="chip" :style="levelChip(scope.row.level)">{{ scope.row.level }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column prop="score" label="分数" width="80" />
-      <el-table-column label="类别" width="220">
-        <template #default="scope">{{ (scope.row.types || []).join(", ") }}</template>
-      </el-table-column>
-      <el-table-column prop="hits" label="命中" width="70" />
-      <el-table-column prop="model_chain" label="模型链" width="110" />
-      <el-table-column prop="masked" label="脱敏副本" show-overflow-tooltip />
-    </el-table>
-    <div v-else class="empty">还没有检测结果</div>
+      </div>
+    </section>
+    <el-dialog v-model="detailOpen" title="命中详情" width="640px"
+      ><template v-if="detail"
+        ><dl class="kv">
+          <dt>片段位置</dt>
+          <dd>{{ detail.path }}</dd>
+          <dt>风险等级</dt>
+          <dd><RiskIndicator :level="detail.level" /></dd>
+          <dt>评分 / 命中数</dt>
+          <dd>{{ detail.score }} / {{ detail.hits }}</dd>
+          <dt>类别</dt>
+          <dd>{{ (detail.types || []).join(" / ") || "无" }}</dd>
+          <dt>模型链</dt>
+          <dd>{{ detail.model_chain }}</dd>
+          <dt>降级 / 直接判定</dt>
+          <dd>
+            {{ detail.degraded ? "是" : "否" }} /
+            {{ detail.direct ? "是" : "否" }}
+          </dd>
+          <dt>判断依据</dt>
+          <dd>{{ detail.reason || "服务端未提供额外说明" }}</dd>
+        </dl>
+        <h4>脱敏副本</h4>
+        <div class="detail-content">{{ detail.masked }}</div>
+        <h4>命中规则与区间</h4>
+        <el-table :data="detail.spans || []" max-height="220"
+          ><el-table-column prop="label" label="类别" /><el-table-column
+            prop="rule"
+            label="规则"
+            show-overflow-tooltip /><el-table-column
+            prop="start"
+            label="起点"
+            width="65" /><el-table-column
+            prop="end"
+            label="终点"
+            width="65" /></el-table></template
+    ></el-dialog>
   </div>
 
   <!-- AI 推荐方案弹窗 -->
@@ -517,7 +938,12 @@ onMounted(async () => {
         />
       </el-form-item>
       <el-form-item label="场景模板">
-        <el-select v-model="suggestForm.scenario" clearable placeholder="可选" style="width: 240px">
+        <el-select
+          v-model="suggestForm.scenario"
+          clearable
+          placeholder="可选"
+          style="width: 240px"
+        >
           <el-option
             v-for="item in scenarios"
             :key="item.key"
@@ -527,13 +953,17 @@ onMounted(async () => {
         </el-select>
       </el-form-item>
     </el-form>
-    <div v-if="suggestError" class="hint-line" style="color: #dc2626">{{ suggestError }}</div>
+    <div v-if="suggestError" class="hint-line" style="color: #dc2626">
+      {{ suggestError }}
+    </div>
     <div v-if="suggestResult" style="margin-top: 12px">
       <dl class="kv">
         <dt>推荐策略</dt>
         <dd>{{ strategyLabelFor(suggestResult.strategy) }}</dd>
         <dt>脱敏级别</dt>
-        <dd>{{ suggestResult.mask_level }}（最低 {{ suggestResult.min_level }}）</dd>
+        <dd>
+          {{ suggestResult.mask_level }}（最低 {{ suggestResult.min_level }}）
+        </dd>
         <dt>可选识别</dt>
         <dd>
           L2 {{ suggestResult.enable_l2 ? "开" : "关" }} · L3
@@ -553,8 +983,14 @@ onMounted(async () => {
     </div>
     <template #footer>
       <el-button @click="suggestOpen = false">关闭</el-button>
-      <el-button :loading="suggestLoading" @click="runSuggest">获取推荐</el-button>
-      <el-button type="primary" :disabled="!suggestResult" @click="applySuggestion">
+      <el-button :loading="suggestLoading" @click="runSuggest"
+        >获取推荐</el-button
+      >
+      <el-button
+        type="primary"
+        :disabled="!suggestResult"
+        @click="applySuggestion"
+      >
         应用到当前设置
       </el-button>
     </template>
@@ -563,7 +999,8 @@ onMounted(async () => {
   <!-- 还原加密内容弹窗 -->
   <el-dialog v-model="decryptOpen" title="还原加密内容" width="640px">
     <div class="hint-line" style="margin-top: 0">
-      把含 <code>enc:</code> 密文的脱敏文本交给本机服务端还原。仅本机还原，请勿外发。
+      把含
+      <code>enc:</code> 密文的脱敏文本交给本机服务端还原。仅本机还原，请勿外发。
     </div>
     <el-input
       v-model="decryptInput"
@@ -572,21 +1009,31 @@ onMounted(async () => {
       placeholder="粘贴含 enc: 密文的脱敏文本"
       style="margin-top: 10px"
     />
-    <div v-if="decryptError" class="hint-line" style="color: #dc2626">{{ decryptError }}</div>
+    <div v-if="decryptError" class="hint-line" style="color: #dc2626">
+      {{ decryptError }}
+    </div>
     <div v-if="decryptResult" style="margin-top: 12px">
       <div class="pane">
         <div class="pane-head">
-          还原结果（{{ decryptResult.replaced }} 个密文片段 · 策略 {{ decryptResult.strategy }}）
+          还原结果（{{ decryptResult.replaced }} 个密文片段 · 策略
+          {{ decryptResult.strategy }}）
         </div>
         <div class="pane-body">{{ decryptResult.text }}</div>
       </div>
-      <el-alert type="warning" :closable="false" show-icon style="margin-top: 10px">
+      <el-alert
+        type="warning"
+        :closable="false"
+        show-icon
+        style="margin-top: 10px"
+      >
         还原结果含明文敏感信息，只在本机查看，请勿复制外发或写入工单。
       </el-alert>
     </div>
     <template #footer>
       <el-button @click="decryptOpen = false">关闭</el-button>
-      <el-button type="primary" :loading="decryptLoading" @click="runDecrypt">还原</el-button>
+      <el-button type="primary" :loading="decryptLoading" @click="runDecrypt"
+        >还原</el-button
+      >
     </template>
   </el-dialog>
 </template>

@@ -253,5 +253,5 @@ export const api = {
   fetchAssistantModels: () => request("/assistant/models"),
 };
 
-export const LEVEL_COLORS = { L3: "#dc2626", L2: "#ea580c", L1: "#d97706", SAFE: "#0d9488" };
+export const LEVEL_COLORS = { L3: "#cf4b62", L2: "#b87927", L1: "#548bd0", SAFE: "#26996e" };
 export const LEVEL_LABELS = { L3: "高危", L2: "中危", L1: "低危", SAFE: "安全" };

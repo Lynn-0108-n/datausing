@@ -1,4 +1,6 @@
 <script setup>
+import { safeError } from "../workspace";
+import PageHeader from "../components/PageHeader.vue";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import * as echarts from "echarts";
 import { ElMessage } from "element-plus";
@@ -12,12 +14,17 @@ const histEl = ref(null);
 const charts = [];
 let resizeHandler = null;
 let stopWatchTheme = null;
+let resizeObserver;
 
 // AI 风险研判：只发聚合数字（各级别/类别命中数、任务数），不发原文
 const adviseLoading = ref(false);
 const adviseError = ref("");
 const adviseResult = ref(null);
-const SOURCE_LABELS = { rules: "本地规则", local_llm: "本机模型", degraded: "模型不可用已回退" };
+const SOURCE_LABELS = {
+  rules: "本地规则",
+  local_llm: "本机模型",
+  degraded: "模型不可用已回退",
+};
 const adviseSource = ref("");
 
 async function runAdvise() {
@@ -35,10 +42,11 @@ async function runAdvise() {
       tasks: stats.value.tasks || 0,
     });
     adviseResult.value = body;
-    adviseSource.value = SOURCE_LABELS[body.source] || body.source || "未知来源";
+    adviseSource.value =
+      SOURCE_LABELS[body.source] || body.source || "未知来源";
   } catch (err) {
     adviseResult.value = null;
-    adviseError.value = `研判失败：${err}`;
+    adviseError.value = `研判失败：${safeError(err)}`;
   } finally {
     adviseLoading.value = false;
   }
@@ -84,6 +92,10 @@ function render() {
       }));
     pie.setOption(
       {
+        animationDuration: 240,
+        animationDurationUpdate: 160,
+        animation: !window.matchMedia("(prefers-reduced-motion: reduce)")
+          .matches,
         textStyle: { color: palette.text },
         tooltip: { trigger: "item" },
         legend: { bottom: 0, textStyle: { color: palette.muted } },
@@ -93,20 +105,36 @@ function render() {
             radius: ["42%", "68%"],
             center: ["50%", "45%"],
             label: { formatter: "{b}: {c} ({d}%)", color: palette.text },
-            data: rows.length ? rows : [{ name: "暂无数据", value: 1, itemStyle: { color: palette.border } }],
+            data: rows.length
+              ? rows
+              : [
+                  {
+                    name: "暂无数据",
+                    value: 1,
+                    itemStyle: { color: palette.border },
+                  },
+                ],
           },
         ],
       },
-      true
+      true,
     );
   }
 
   const bar = ensureChart(barEl.value);
   if (bar) {
-    const rows = (data.by_type || []).map((item) => item.key || item.type || item.name);
-    const counts = (data.by_type || []).map((item) => item.count ?? item.value ?? 0);
+    const rows = (data.by_type || []).map(
+      (item) => item.key || item.type || item.name,
+    );
+    const counts = (data.by_type || []).map(
+      (item) => item.count ?? item.value ?? 0,
+    );
     bar.setOption(
       {
+        animationDuration: 240,
+        animationDurationUpdate: 160,
+        animation: !window.matchMedia("(prefers-reduced-motion: reduce)")
+          .matches,
         textStyle: { color: palette.text },
         tooltip: { trigger: "axis" },
         grid: { left: 42, right: 16, top: 24, bottom: 48 },
@@ -121,9 +149,16 @@ function render() {
           axisLabel: { color: palette.muted },
           splitLine: { lineStyle: { color: palette.border } },
         },
-        series: [{ type: "bar", data: counts, barMaxWidth: 34, itemStyle: { color: cssVar("--accent", "#0d9488") } }],
+        series: [
+          {
+            type: "bar",
+            data: counts,
+            barMaxWidth: 34,
+            itemStyle: { color: cssVar("--accent", "#0d9488") },
+          },
+        ],
       },
-      true
+      true,
     );
   }
 
@@ -132,6 +167,10 @@ function render() {
     const entries = Object.entries(data.score_histogram || {});
     hist.setOption(
       {
+        animationDuration: 240,
+        animationDurationUpdate: 160,
+        animation: !window.matchMedia("(prefers-reduced-motion: reduce)")
+          .matches,
         textStyle: { color: palette.text },
         tooltip: { trigger: "axis" },
         grid: { left: 42, right: 16, top: 24, bottom: 40 },
@@ -151,11 +190,11 @@ function render() {
             type: "bar",
             data: entries.map(([, count]) => count),
             barMaxWidth: 46,
-            itemStyle: { color: "#ea580c" },
+            itemStyle: { color: cssVar("--warning") },
           },
         ],
       },
-      true
+      true,
     );
   }
 }
@@ -165,12 +204,17 @@ async function load() {
     stats.value = await api.stats();
     render();
   } catch (err) {
-    ElMessage.error(`加载统计失败：${err}`);
+    ElMessage.error(`加载统计失败：${safeError(err)}`);
   }
 }
 
 onMounted(() => {
   load();
+  resizeObserver = new ResizeObserver(() =>
+    charts.forEach((chart) => chart.resize()),
+  );
+  if (pieEl.value?.parentElement)
+    resizeObserver.observe(pieEl.value.parentElement);
   resizeHandler = () => charts.forEach((chart) => chart.resize());
   window.addEventListener("resize", resizeHandler);
   // 换主题时旧 canvas 颜色不会自动更新，干脆重建
@@ -181,6 +225,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  resizeObserver?.disconnect();
   if (resizeHandler) window.removeEventListener("resize", resizeHandler);
   if (stopWatchTheme) stopWatchTheme();
   disposeCharts();
@@ -188,11 +233,37 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
+  <PageHeader
+    title="统计看板"
+    description="从真实任务与检测数据中，观察风险分布与处理情况。"
+    index="RISK ANALYTICS"
+  />
+  <div class="metric-strip">
+    <div class="metric">
+      <span>检测任务</span><strong>{{ stats?.tasks ?? "—" }}</strong>
+    </div>
+    <div class="metric">
+      <span>检测片段</span><strong>{{ stats?.total_findings ?? "—" }}</strong>
+    </div>
+    <div class="metric">
+      <span>L3 高风险片段</span
+      ><strong style="color: var(--danger)">{{
+        stats?.by_level?.L3 ?? "—"
+      }}</strong>
+    </div>
+    <div class="metric">
+      <span>SAFE 安全片段</span
+      ><strong style="color: var(--success)">{{
+        stats?.by_level?.SAFE ?? "—"
+      }}</strong>
+    </div>
+  </div>
   <div class="panel">
     <div class="panel-title">
       统计看板
       <span class="hint" v-if="stats">
-        命中 {{ stats.total_findings }} 条 · 任务 {{ stats.tasks }} 个（全部任务聚合）
+        命中 {{ stats.total_findings }} 条 · 任务
+        {{ stats.tasks }} 个（全部任务聚合）
       </span>
     </div>
     <el-button size="small" @click="load">刷新</el-button>
@@ -218,15 +289,23 @@ onBeforeUnmount(() => {
       <span class="hint">基于当前聚合统计生成结论与建议，不上传原文</span>
     </div>
     <div class="toolbar" style="margin-top: 0">
-      <el-button type="primary" size="small" :loading="adviseLoading" :disabled="!stats" @click="runAdvise">
+      <el-button
+        type="primary"
+        size="small"
+        :loading="adviseLoading"
+        :disabled="!stats"
+        @click="runAdvise"
+      >
         生成研判
       </el-button>
       <span v-if="adviseResult" class="hint">
-        来源：{{ adviseSource }} · 发现 {{ adviseResult.findings.length }} 条 · 建议
-        {{ adviseResult.recommendations.length }} 条
+        来源：{{ adviseSource }} · 发现 {{ adviseResult.findings.length }} 条 ·
+        建议 {{ adviseResult.recommendations.length }} 条
       </span>
     </div>
-    <div v-if="adviseError" class="hint-line" style="color: #dc2626">{{ adviseError }}</div>
+    <div v-if="adviseError" class="hint-line" style="color: var(--danger)">
+      {{ adviseError }}
+    </div>
     <div v-if="adviseLoading" class="empty">正在研判…</div>
     <template v-else-if="adviseResult">
       <div class="pane" style="margin-top: 12px">
@@ -237,19 +316,28 @@ onBeforeUnmount(() => {
         <div class="pane">
           <div class="pane-head">发现</div>
           <ul v-if="adviseResult.findings.length" class="list-num">
-            <li v-for="(item, index) in adviseResult.findings" :key="index">{{ item }}</li>
+            <li v-for="(item, index) in adviseResult.findings" :key="index">
+              {{ item }}
+            </li>
           </ul>
           <div v-else class="empty">暂无发现</div>
         </div>
         <div class="pane">
           <div class="pane-head">建议</div>
           <ul v-if="adviseResult.recommendations.length" class="list-num">
-            <li v-for="(item, index) in adviseResult.recommendations" :key="index">{{ item }}</li>
+            <li
+              v-for="(item, index) in adviseResult.recommendations"
+              :key="index"
+            >
+              {{ item }}
+            </li>
           </ul>
           <div v-else class="empty">暂无建议</div>
         </div>
       </div>
     </template>
-    <div v-else class="empty">还没有研判结果，点「生成研判」基于当前统计生成</div>
+    <div v-else class="empty">
+      还没有研判结果，点「生成研判」基于当前统计生成
+    </div>
   </div>
 </template>
