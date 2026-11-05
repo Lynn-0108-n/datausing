@@ -5,12 +5,12 @@ export function sourceSegments(text, format) {
   if (format === "json") {
     try {
       const walk = (value, path) => {
-        if (typeof value === "string") segments.set(path, value);
+        if (typeof value === "string" || typeof value === "number") segments.set(path, String(value));
         else if (Array.isArray(value))
           value.forEach((item, i) => walk(item, `${path}[${i}]`));
         else if (value && typeof value === "object")
           Object.entries(value).forEach(([key, item]) =>
-            walk(item, `${path}.${key}`),
+            walk(item, /^[\p{L}\p{N}_]+$/u.test(key) ? `${path}.${key}` : `${path}[${JSON.stringify(key)}]`),
           );
       };
       walk(JSON.parse(text), "$");
@@ -48,10 +48,13 @@ export function sourceSegments(text, format) {
     row.push(cell);
     if (row.some((item) => item.trim())) rows.push(row);
     const header = rows.shift() || [];
+    const width = Math.max(header.length, ...rows.map((cells) => cells.length));
+    const columns = Array.from({ length: width }, (_, c) => header[c]?.trim() || `col${c + 1}`);
+    const coordinates = new Set(columns).size !== columns.length;
     rows.forEach((cells, r) =>
       cells.forEach((value, c) =>
         segments.set(
-          `row${r + 1}.${header[c]?.trim() || `col${c + 1}`}`,
+          coordinates ? `row${r + 1}[${c}]` : `row${r + 1}.${columns[c]}`,
           value,
         ),
       ),

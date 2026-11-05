@@ -3,6 +3,19 @@ import assert from "node:assert/strict";
 import { renderHighlight, maskedDocumentText } from "../src/highlight.js";
 import { sourceSegments, countHits, safeError } from "../src/workspace.js";
 
+test("JSON special keys and numeric values follow unambiguous backend paths", () => {
+  const index = sourceSegments('{"a.b":"one","a":{"b":"two"},"":13800138000}', "json");
+  assert.equal(index.get('$["a.b"]'), "one");
+  assert.equal(index.get('$.a.b'), "two");
+  assert.equal(index.get('$[""]'), "13800138000");
+});
+
+test("duplicate CSV headers map by coordinates", () => {
+  const index = sourceSegments("phone,phone\nfirst,second", "csv");
+  assert.equal(index.get("row1[0]"), "first");
+  assert.equal(index.get("row1[1]"), "second");
+});
+
 test("Python Unicode offsets highlight correctly after emoji", () => {
   const html = renderHighlight("😀电话13800138000", [
     { start: 3, end: 14, label: "手机号", level: "L2", finding: 2 },
