@@ -82,3 +82,6 @@ server/logs/
 # PyInstaller onefile 解包临时目录
 .flowmask-tmp/
 server/.flowmask-tmp/
+
+# 测试文件（仅本地使用，不入库）
+测试文件/
