@@ -1,0 +1,84 @@
+# 编译产物
+/bin/
+*.exe
+*.test
+*.out
+*.prof
+
+# 日志与本地数据
+*.log
+/data/
+
+# 编辑器与系统文件
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 本地环境
+.env
+.env.*
+!.env.example
+
+# 本地构建产物
+/netmon-linux
+/netmon-linux.exe
+# Tauri 客户端
+/client/src-tauri/binaries/
+/client/node_modules/
+/client/dist/
+/client/src-tauri/target/
+/client/src-tauri/gen/
+npm-debug.log*
+# 移动端图标（本项目仅 Windows 桌面目标）
+/client/src-tauri/icons/android/
+/client/src-tauri/icons/ios/
+
+# Python 本地环境与模型权重（推理/训练用，不入库）
+.venv/
+.venv-*/
+__pycache__/
+*.pyc
+/models/
+*.gguf
+*.onnx
+*.safetensors
+# Python 测试/构建缓存与服务端本地数据
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+server/data/
+# 评测产出的机器明细（报告见 docs/评测报告.md）
+server/eval/latest.json
+server/eval/_*.json
+# L2 训练产物（权重不提交）
+server/l2_models/
+server/l3_models/
+server/data/l3_training.jsonl
+
+# 前端（Vue3 + Vite）
+web/node_modules/
+web/dist/
+server/models/
+# 服务端本地推理/训练产物（权重、日志、临时对比结果）
+server/_*.err
+server/_*.log
+server/_*.pid
+server/_l2_*.json
+server/_l3_*.json
+
+# 桌面 exe 打包产物（PyInstaller，体积大且可重建）
+server/dist_exe/
+server/build_exe/
+server/dist_dbg/
+server/build_dbg/
+server/flowmask_debug.spec
+server/FlowMask-error.txt
+server/logs/
+# 打包时的临时构建目录（build_exe.ps1 用）
+/_build_tmp/
+
+# PyInstaller onefile 解包临时目录
+.flowmask-tmp/
+server/.flowmask-tmp/

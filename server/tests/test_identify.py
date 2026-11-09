@@ -1,0 +1,299 @@
+"""识别层单元测试：规则 → 评分分级 → 脱敏 → 隐私算子。"""
+
+from __future__ import annotations
+
+import random
+
+from app.identify import (
+    EntityType,
+    Level,
+    analyze,
+    check_l_diversity,
+    detect,
+    entity_label,
+    generalize_numeric,
+    laplace_noise,
+    mask,
+    mask_value,
+    parse_entity_type,
+    perturb_numeric,
+)
+
+ID_CARD = "11010519491231002X"  # 校验位合法（GB 11643-1999）
+BANK_CARD = "4111111111111111"  # Luhn 合法
+PHONE = "13800138000"
+
+
+def test_detect_id_card_and_dedupe() -> None:
+    hits = detect(f"身份证号：{ID_CARD}")
+    assert [hit.rule for hit in hits] == ["idcard18"]
+    # 18 位数字同时"形似"银行卡，重叠时只保留证据最强的证件规则
+    assert all(hit.type == EntityType.ID_CARD for hit in hits)
+
+
+def test_detect_rejects_bad_checksum() -> None:
+    bad = "110105194912310021"  # 校验位被改，MOD 11-2 不通过
+    assert detect(f"身份证号：{bad}") == []
+
+
+def test_detect_bank_card_requires_luhn() -> None:
+    assert [hit.type for hit in detect(f"卡号 {BANK_CARD}")] == [EntityType.BANK_CARD]
+    assert detect("卡号 4111111111111112") == []  # Luhn 不通过
+
+
+def test_detect_secret_with_quoted_key() -> None:
+    hits = detect('{"api_key":"sk-ABCDEFGH12345678"}')
+    assert hits and hits[0].type == EntityType.SECRET
+
+
+def test_medical_value_allows_inner_space() -> None:
+    """病历里常见「2 型糖尿病」这种带空格的写法，规则要能抓到完整值。"""
+    hits = detect("患者 陈静，诊断：2 型糖尿病，复诊医院：市第一人民医院。")
+    medical = [hit for hit in hits if hit.type is EntityType.MEDICAL]
+    assert medical, "带空格的就诊结论没有命中"
+    assert medical[0].value == "2 型糖尿病"
+
+
+def test_medical_record_key_is_detected() -> None:
+    """「病历记录：高血压三期」是常见写法，键是「病历(记录)」而不是「诊断」。"""
+    hits = detect("病历记录：高血压三期，用药见附表")
+    medical = [hit for hit in hits if hit.type is EntityType.MEDICAL]
+    assert medical, "病历记录键没有被识别"
+    assert medical[0].value.startswith("高血压")
+
+
+def test_medical_chief_complaint_is_detected() -> None:
+    """「主诉：反复头痛 3 个月」没有「诊断」二字，也属于病历敏感内容。"""
+    hits = detect("主诉：反复头痛 3 个月，伴恶心呕吐。")
+    medical = [hit for hit in hits if hit.type is EntityType.MEDICAL]
+    assert medical, "主诉小节没有被识别"
+    assert medical[0].value.startswith("反复头痛")
+
+
+def test_medical_english_key_is_detected() -> None:
+    """导出的病历 JSON / SQL 常把键写成 diagnosis，别让它整条漏掉。"""
+    hits = detect('{"patient": "陈静", "diagnosis": "2 型糖尿病", "record_no": 7}')
+    medical = [hit for hit in hits if hit.type is EntityType.MEDICAL]
+    assert medical, "英文键 diagnosis 没有被识别"
+    assert medical[0].value.startswith("2 型糖尿病")
+    # 极端反例：普通英文单词里含 diagnosis 的长词不应命中
+    assert not [hit for hit in detect("autodiagnosis enabled") if hit.type is EntityType.MEDICAL]
+
+
+def test_name_without_colon_is_detected() -> None:
+    """HR 简历/银行流水里的「姓名孙七」「户名赵六」没有冒号也要识别。"""
+    cases = {
+        "姓名孙七，身份证号 120101198706050006，手机 13800138000。": "孙七",
+        "户名赵六，账户 6222020200012345670，交易金额 5000.00。": "赵六",
+    }
+    for text, want in cases.items():
+        hits = [hit for hit in detect(text) if hit.type is EntityType.NAME]
+        assert hits, f"无冒号姓名没有识别：{text}"
+        assert hits[0].value == want, f"{text} 抓到 {hits[0].value}"
+
+
+def test_name_label_does_not_fire_on_instructions() -> None:
+    """「姓名是必填项」这类说明文字不能当成人名。"""
+    hits = [hit for hit in detect("姓名是必填项，请先填写再提交。") if hit.type is EntityType.NAME]
+    assert not hits
+
+
+def test_free_text_name_without_field_key() -> None:
+    """自由文本里没有「姓名：」字段名，也要靠姓氏 + 上下文把裸人名捞出来。"""
+    cases = {
+        "萧亚轩反馈仓库这周需要补货，回程车票已改签到周日。": "萧亚轩",  # 句首 + 动作
+        "这份材料由魏民整理，周五前要发出去。": "魏民",  # 「由…整理」动作句式
+        "评审意见里提到要请金秀贤补充一下预算说明。": "金秀贤",  # 「请…补充」
+        "客户王小明办理了宽带新装业务。": "王小明",  # 角色词 + 姓名
+    }
+    for text, want in cases.items():
+        hits = [hit for hit in detect(text) if hit.type is EntityType.NAME]
+        assert hits, f"自由文本人名没有识别：{text}"
+        assert hits[0].value == want, f"{text} 抓到 {hits[0].value}"
+        assert hits[0].rule.startswith("name_free")
+
+
+def test_free_text_name_does_not_fire_on_common_words() -> None:
+    """姓氏表 + 停用字只是启发式，普通词不能被人名规则误抓。"""
+    cases = [
+        "系统反馈接口超时，请稍后重试。",
+        "本周服务可用率 99.9%，暂无异常。",
+        "季度报表已提交财务审核。",
+        "会议地点 3 楼会议室，请按时参加。",
+    ]
+    for text in cases:
+        names = [hit for hit in detect(text) if hit.type is EntityType.NAME]
+        assert not names, f"{text} 被人名规则误报：{[hit.value for hit in names]}"
+
+
+def test_free_text_address_without_field_key() -> None:
+    """叙述句里的完整住址（省/市 + 区 + 路/街 + 号）应当被 address_free 抓到。"""
+    text = "他住在北京市海淀区中关村大街 1 号，平时不在家。"
+    result = analyze(text)
+    assert result.types and EntityType.ADDRESS in result.types
+    assert result.level is Level.LOW  # 地址单独出现是中低危，不该被抬成中危
+    hit = next(hit for hit in result.hits if hit.rule == "address_free")
+    # 捕获组只含地址本身：不出「住在」这类前缀，且吃到门牌号
+    assert hit.value.startswith("北京市海淀区中关村大街")
+    assert "号" in hit.value and "住在" not in hit.value
+
+
+def test_detect_name_kv_uses_group() -> None:
+    hits = detect("姓名：张三")
+    assert hits and hits[0].type == EntityType.NAME and hits[0].value == "张三"
+
+
+def test_score_phone_alone_is_mid() -> None:
+    result = analyze(f"联系电话 {PHONE}")
+    assert result.level == Level.MID
+    assert 0.55 <= result.score < 0.85
+
+
+def test_score_email_alone_is_low() -> None:
+    assert analyze("邮箱 zhang.san@example.com").level == Level.LOW
+
+
+def test_score_ip_alone_is_safe() -> None:
+    assert analyze("调试地址 192.168.1.1").level == Level.SAFE
+
+
+def test_id_card_direct_to_high() -> None:
+    result = analyze(f"自然人 {ID_CARD}")
+    assert result.direct and result.level == Level.HIGH
+
+
+def test_cooccurrence_raises_level() -> None:
+    result = analyze("姓名：张三，电话：13800138000，地址：福建省福州市鼓楼区五四路100号")
+    assert result.level == Level.HIGH  # 身份类 3 个：姓名 + 手机号 + 地址
+    assert {EntityType.NAME, EntityType.PHONE, EntityType.ADDRESS} <= set(result.types)
+
+
+def test_mask_templates() -> None:
+    assert mask(f"身份证 {ID_CARD}", analyze(f"身份证 {ID_CARD}")) == "身份证 110105********002X"
+    masked = mask(f"电话 {PHONE}", analyze(f"电话 {PHONE}"))
+    assert masked.startswith("电话 1") and "*" in masked and PHONE not in masked
+    assert mask("普通文本", analyze("普通文本")) == "普通文本"
+
+
+def test_mask_level_override() -> None:
+    text = f"电话 {PHONE}"
+    forced = mask(text, analyze(text), Level.HIGH)
+    assert "手机号" in forced and PHONE not in forced
+
+
+def test_mask_value_name_hides_surname() -> None:
+    # 姓名保留首字等于暴露姓氏，L2 起改全星号
+    assert mask_value("张三", EntityType.NAME, Level.MID) == "**"
+
+
+def test_mask_value_address_keeps_admin_prefix() -> None:
+    masked = mask_value("北京市朝阳区建国路1号", EntityType.ADDRESS, Level.MID)
+    assert masked == "北京市朝阳区" + "*" * len("建国路1号")
+    assert "建国路" not in masked
+
+
+def test_mask_value_medical_keeps_field_name_at_all_levels() -> None:
+    # 医疗保留字段名，值在 L3/L2/L1 都用星号，不整句替换成类别名
+    assert mask_value("主诉：反复头痛", EntityType.MEDICAL, Level.HIGH) == "主诉：****"
+    assert mask_value("主诉：反复头痛", EntityType.MEDICAL, Level.MID) == "主诉：****"
+    assert mask_value("主诉：反复头痛", EntityType.MEDICAL, Level.LOW) == "[低危]主诉：****"
+
+
+def test_address_hit_extends_to_street_and_number() -> None:
+    # 地址命中只到行政区时，向后吸收街道与门牌，避免脱敏后残留「中关村大街 1 号」
+    result = analyze("收货地址北京市海淀区中关村大街 1 号")
+    address = next(hit for hit in result.hits if hit.type == EntityType.ADDRESS)
+    assert "中关村大街" in address.value
+    assert "1 号" in address.value
+
+
+def test_pipeline_masks_address_from_street() -> None:
+    from app.identify.pipeline import DetectionPipeline, DetectOptions
+
+    finding = DetectionPipeline().analyze_text("收货地址北京市海淀区中关村大街 1 号", DetectOptions())
+    assert finding is not None
+    assert "北京市海淀区" in finding.masked
+    assert "中关村" not in finding.masked
+    assert "1 号" not in finding.masked
+
+
+def test_mask_value_province_only_address_blocks() -> None:
+    # 地址只有省份时，保留省份等于原文，直接占位
+    assert mask_value("湖南", EntityType.ADDRESS, Level.LOW) == "[低危]地址"
+
+
+def test_mask_value_id_card_keeps_region_and_tail() -> None:
+    expected = "110105********002X"
+    assert mask_value("11010519491231002X", EntityType.ID_CARD, Level.MID) == expected
+    assert mask_value("11010519491231002X", EntityType.ID_CARD, Level.HIGH) == expected
+    assert mask_value("11010519491231002X", EntityType.ID_CARD, Level.LOW) == f"[低危]{expected}"
+
+
+def test_mask_value_low_risk_does_not_expose_original() -> None:
+    # L1 只做「需复核」标记，不能把原文留在脱敏副本里
+    masked = mask_value(PHONE, EntityType.PHONE, Level.LOW)
+    assert masked == "[低危]1**********"
+    assert PHONE not in masked
+
+
+def test_entity_type_roundtrip() -> None:
+    assert parse_entity_type("身份证号") is EntityType.ID_CARD
+    assert parse_entity_type("id_card") is EntityType.ID_CARD
+    assert entity_label(EntityType.SECRET) == "密钥凭据"
+    assert parse_entity_type("不存在的类别") is None
+
+
+def test_laplace_noise_mean_and_reproducible() -> None:
+    values = [laplace_noise(1.0, 10.0, random.Random(seed)) for seed in range(2000)]
+    # 尺度 = sensitivity/epsilon = 10，2000 次采样的均值应明显小于尺度
+    assert abs(sum(values) / len(values)) < 1.0
+    assert laplace_noise(1.0, 1.0, random.Random(42)) == laplace_noise(1.0, 1.0, random.Random(42))
+
+
+def test_perturb_and_generalize() -> None:
+    assert perturb_numeric(100.0, epsilon=0.001, sensitivity=1000.0) != 100.0
+    assert generalize_numeric(13800138000, 1000) == "13800138000-13800139000"
+
+
+def test_l_diversity() -> None:
+    rows = [
+        {"age": "20", "zip": "100", "disease": "感冒"},
+        {"age": "20", "zip": "100", "disease": "流感"},
+    ]
+    report = check_l_diversity(rows, ["age", "zip"], "disease", l=3)
+    assert report.ok is False and report.groups == 1 and len(report.violations) == 1
+
+    rows.append({"age": "20", "zip": "100", "disease": "胃炎"})
+    report = check_l_diversity(rows, ["age", "zip"], "disease", l=3)
+    assert report.ok is True and report.violations == []
+
+
+def test_bankcard_rejects_non_bin_prefix() -> None:
+    """19 位订单号即使碰巧通过 Luhn，也不能当银行卡（首位不是卡组织 BIN）。"""
+    from app.identify.rules import valid_bankcard, valid_luhn
+
+    prefix = "202610180001234567"
+    order_like = next(prefix + digit for digit in "0123456789" if valid_luhn(prefix + digit))
+    assert valid_luhn(order_like) is True  # 先确认它确实过了 Luhn
+    assert valid_bankcard(order_like) is False
+    assert valid_bankcard("6222021234567894") is True
+
+    result = analyze(f"订单号 {order_like}，已发货。")
+    assert result.level.value == "SAFE"
+    assert result.type_keys == []
+
+def test_bare_sk_api_key_is_l3() -> None:
+    """裸 sk- Key（HTTP 头/URL 里没有 key=value 上下文）也要判 L3。
+
+    这是扩样到 165 条评测集后暴露的盲区：secret_kv 依赖 `api_key=...` 这类键名，
+    `Authorization: Bearer sk-...` 会被漏掉。
+    """
+    key = "sk-ABCDEFGH12345678IJKLMNOP"
+    result = analyze(f"GET /v2/export HTTP/1.1\r\nAuthorization: Bearer {key}\r\n")
+    assert result.level.value == "L3"
+    assert "secret" in result.type_keys
+    assert result.direct is True
+
+    # 反例：普通短横线单词、短 token 不应误报
+    benign = analyze("字段 sk-feature-flag 的默认值是 on，部署脚本见 docs。")
+    assert "secret" not in benign.type_keys

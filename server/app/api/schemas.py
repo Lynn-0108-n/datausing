@@ -1,0 +1,506 @@
+"""接口请求/响应模型（Pydantic v2）。
+
+Swagger（``/docs``）直接读这里，因此描述写清楚：初赛评审点开就能看懂每个字段。
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import datetime
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from ..identify import EntityType
+
+
+class DetectRequest(BaseModel):
+    """即时检测请求（不落库，用于左右对照演示）。"""
+
+    text: str = Field(min_length=1, max_length=200_000, description="待检测文本")
+    content_type: str = Field(default="text", description="text / json / csv / sql（自动探测）")
+    enable_l2: bool = Field(default=False, description="是否启用 L2 语义识别（需推理服务在线）")
+    enable_l3: bool = Field(default=False, description="是否启用 L3 本地大模型复核（需 Ollama 在线）")
+    # None = 跟服务端默认（FLOWMASK_ENABLE_NER）；显式 true/false 按本次请求
+    enable_ner: bool | None = Field(default=None, description="是否启用 L1.5 实体识别（人名/地址，适合自由文本）")
+    enable_keywords: bool | None = Field(default=None, description="是否启用 L1 敏感词表（法规/行业/企业三级知识库）；None=跟随服务端默认（开）")
+    mask_level: str | None = Field(default=None, description="强制按该级别脱敏；空表示按实际级别")
+    min_level: str = Field(default="SAFE", description="只返回 ≥ 该级别的结果（SAFE/L1/L2/L3）")
+
+
+class DetectExportRequest(BaseModel):
+    """即时检测并导出脱敏文件（文本入口）。
+
+    与 DetectRequest 的区别：
+    - 内部固定 min_level=SAFE（覆盖所有命中，不受界面分级过滤影响）；
+    - 新增 strategy 字段选择导出脱敏策略（block/partial/hash/generalize/pseudonym/encrypt）；
+    - 返回的是文件流（Response），不是 JSON。
+    """
+
+    text: str = Field(min_length=1, max_length=200_000, description="待检测文本")
+    strategy: str = Field(default="partial", description="脱敏策略：block/partial/hash/generalize/pseudonym/encrypt")
+    format: str | None = Field(default=None, description="输出格式；空=按自动探测结果（text/json/csv/sql）")
+    preview: bool = Field(default=False, description="true=返回 JSON {masked} 不下载文件，用于左栏实时预览")
+    enable_l2: bool = Field(default=False)
+    enable_l3: bool = Field(default=False)
+    enable_ner: bool | None = Field(default=None)
+    enable_keywords: bool | None = Field(default=None)
+    mask_level: str | None = Field(default=None, description="强制按该级别脱敏；空表示按实际级别")
+
+
+
+class SpanOut(BaseModel):
+    """命中区间：前端据此在原文上高亮（偏移是字符下标，不含敏感值本身）。"""
+
+    start: int
+    end: int
+    type: str = Field(description="英文类别键：id_card / phone / ...")
+    label: str = Field(description="中文类别名：身份证号 / 手机号 / ...")
+    rule: str = Field(description="命中的规则名，便于解释与排障")
+
+
+class SegmentOut(BaseModel):
+    path: str = Field(description="片段位置：JSON Path / 列名+行号 / SQL 语句+字面量")
+    level: str
+    score: float
+    types: list[str]
+    hits: int
+    masked: str = Field(description="脱敏副本（不含原文敏感值）")
+    model_chain: str = Field(description="实际使用的模型链：l1 / l1>l2 / l1>l2>l3")
+    reason: str | None = None
+    degraded: bool = False
+    direct: bool = False
+    spans: list[SpanOut] = Field(default_factory=list, description="命中区间（原文高亮用）")
+
+
+class DetectOut(BaseModel):
+    content_type: str
+    segments: int = Field(description="实际检测的片段数")
+    findings: list[SegmentOut]
+    by_level: dict[str, int]
+    duration_ms: int
+    degraded: bool
+    masked_document: dict[str, Any] = Field(description="脱敏后的文档表示，用于左右对照")
+    task_id: str = Field(default="", description="自动创建的检测记录 task_id（空=创建失败，仍返回检测结果）")
+
+
+class TaskCreateOut(BaseModel):
+    task_id: str
+    status: str
+
+
+class TaskOut(BaseModel):
+    id: str
+    created_at: str
+    finished_at: str | None = None
+    status: str = Field(description="pending / running / done / failed")
+    source: str
+    content_type: str
+    options: dict[str, Any] = Field(default_factory=dict)
+    total_segments: int = 0
+    total_findings: int = 0
+    error: str | None = None
+
+
+class FindingOut(BaseModel):
+    id: int
+    task_id: str
+    path: str
+    level: str
+    score: float
+    types: list[str]
+    hits: int
+    masked: str
+    original_hash: str = Field(description="原文 SHA-256：可对位审计，但不泄露内容")
+    model_chain: str
+    confidence_vector: list[dict[str, Any]] = Field(default_factory=list)
+    rule_id: str | None = None
+    degraded: bool = False
+    created_at: str
+
+
+class FindingPage(BaseModel):
+    items: list[FindingOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class TaskPage(BaseModel):
+    items: list[TaskOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class StatsOut(BaseModel):
+    total_findings: int
+    tasks: int
+    by_level: dict[str, int] = Field(description="分级分布（饼图）")
+    by_type: list[dict[str, Any]] = Field(description="类别 TopN（柱状图）")
+    score_histogram: dict[str, int] = Field(description="分数直方图")
+    task_id: str | None = None
+
+
+class RuleOut(BaseModel):
+    id: str
+    name: str
+    type: str
+    pattern: str
+    weight: float
+    confidence: float
+    enabled: bool
+    updated_at: str | None = None
+    builtin: bool = True
+
+
+class RuleIn(BaseModel):
+    """自定义规则（正则 + 类别 + 权重）。"""
+
+    # 前端只填规则名，id 留空时由服务端生成（见 routes_rules.create_rule）
+    id: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=32,
+        pattern=r"^[a-z0-9_]+$",
+        description="规则 id（小写字母/数字/下划线）；留空按规则名生成，不符合规则时用 custom_ 前缀",
+    )
+    name: str = Field(min_length=1, max_length=64)
+    type: str
+    pattern: str = Field(min_length=1, max_length=500)
+    weight: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+    enabled: bool = True
+
+    @field_validator("type")
+    @classmethod
+    def _valid_type(cls, value: str) -> str:
+        allowed = {entity.value for entity in EntityType}
+        if value not in allowed:
+            raise ValueError(f"未知类别: {value}，可选 {sorted(allowed)}")
+        return value
+
+    @field_validator("pattern")
+    @classmethod
+    def _valid_pattern(cls, value: str) -> str:
+        try:
+            re.compile(value)
+        except re.error as exc:
+            raise ValueError(f"正则表达式非法: {exc}") from exc
+        return value
+
+
+class AuditOut(BaseModel):
+    id: int
+    ts: str
+    task_id: str
+    input_hash: str
+    output_hash: str
+    model_chain: str
+    confidence_vector: str | None = None
+    rule_id: str | None = None
+    operator_id: str
+    user_id: str
+    prev_hash: str
+    signature: str
+    entry_hash: str = Field(description="服务端按固定口径重算的本条哈希，可手动复核")
+
+
+class AuditPage(BaseModel):
+    items: list[AuditOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class VerifyOut(BaseModel):
+    ok: bool
+    total: int
+    checked: int
+    broken_at: int | None = None
+    reason: str = ""
+    head_hash: str
+
+
+class KeywordTermOut(BaseModel):
+    """一条敏感词：term 是词本身，tier 表示它来自哪一级知识库。"""
+
+    term: str
+    category: str
+    tier: str = Field(description="regulatory / industry / enterprise")
+    weight: float
+    confidence: float
+
+
+class KeywordsOut(BaseModel):
+    """当前生效的敏感词表。"""
+
+    total: int = Field(description="本次过滤后的条数")
+    all_total: int = Field(description="词表总条目数")
+    tiers: dict[str, int] = {}
+    terms: list[KeywordTermOut] = []
+
+
+class HealthOut(BaseModel):
+    status: str
+    version: str
+    db_path: str
+    enable_l2: bool
+    enable_l3: bool
+    # L1 敏感词表：当前加载的条目数与三级分布
+    keywords: int = 0
+    keyword_tiers: dict[str, int] = {}
+    # L1.5 是否可用（模型加载成功），供前端决定是否显示「自由文本模式」
+    ner: bool = False
+    ner_backend: str = ""
+    # OCR 图片识别是否启用（Day 3.4 新增）
+    ocr: bool = False
+    ocr_engine: str = ""
+    # AI 助手模式（Day 3.4 新增）：off / ollama
+    assistant_mode: str = "off"
+    assistant_model: str = ""
+    uptime_s: int
+
+class DynamicRenderIn(BaseModel):
+    """动态脱敏渲染请求：同一段文本，按是否授权返回两种视图。"""
+
+    text: str = Field(min_length=1, max_length=20000)
+    authorized: bool = False
+    mask_level: str | None = Field(default=None, description="可选：强制按该级别脱敏（L3/L2/L1/SAFE）")
+
+
+class DynamicRenderOut(BaseModel):
+    authorized: bool
+    policy: str
+    level: str
+    level_label: str
+    color: str
+    score: float
+    types: list[str]
+    type_labels: list[str]
+    spans: list[SpanOut] = Field(default_factory=list)
+    masked: str
+    text: str
+    model_chain: str
+    operator_id: str
+    note: str
+
+
+class PolicyOut(BaseModel):
+    levels: list[dict[str, object]]
+
+class TrafficFormatsOut(BaseModel):
+    """流量导入能力声明（前端据此显示上传入口）。"""
+
+    formats: list[str]
+    max_upload_mb: int
+    note: str = ""
+
+
+class TrafficImportOut(BaseModel):
+    """导入结果：报文/会话规模 + 后台任务号（结果仍从 /tasks/{id} 查）。"""
+
+    task_id: str
+    source: str
+    packets: int
+    decoded_frames: int
+    sessions: int
+    messages: int
+    segments: int
+    operator_id: str
+
+
+class IngestSegmentIn(BaseModel):
+    """外部采集器推送的一条正文。"""
+
+    path: str = Field(min_length=1, max_length=512, description="来源标识，如 tcp 10.0.0.5:5001→10.0.0.9:80 POST /api/order")
+    text: str = Field(min_length=1, max_length=200_000, description="待检测正文（原文不落库）")
+    hint: str = Field(default="", max_length=128, description="字段名/列名等上下文，帮助识别姓名/地址这类弱规则")
+
+
+class TrafficIngestIn(BaseModel):
+    """旁路 agent 推送一批正文：一次请求 = 一个检测任务。"""
+
+    source: str = Field(default="agent", max_length=128, description="采集来源标识（会写进任务 source）")
+    content_type: str = Field(default="ingest", max_length=32)
+    segments: list[IngestSegmentIn] = Field(min_length=1, max_length=200)
+    enable_l2: bool = Field(default=False)
+    enable_l3: bool = Field(default=False)
+    enable_ner: bool | None = Field(default=None)
+    mask_level: str | None = Field(default=None)
+    min_level: str = Field(default="SAFE")
+
+
+class TrafficIngestOut(BaseModel):
+    """推送结果：后台任务号，检测结果从 /tasks/{id} 或看板查。"""
+
+    task_id: str
+    source: str
+    segments: int
+    operator_id: str
+
+
+class LiveStartIn(BaseModel):
+    """开始实时跟随一个持续写入的 pcap 文件。"""
+
+    pcap_path: str = Field(
+        default="live.pcap",
+        max_length=512,
+        description="抓包文件路径（相对数据目录，或数据目录下的绝对路径）",
+    )
+    interval_ms: int = Field(default=500, ge=100, le=10_000, description="轮询间隔（毫秒）")
+    window_s: float = Field(default=2.0, ge=0.2, le=60.0, description="聚合窗口：每窗口生成一个任务")
+    enable_l2: bool = False
+    enable_l3: bool = False
+    # None 表示“跟服务端默认走”（FLOWMASK_ENABLE_NER）；显式 true/false 则按本次请求
+    enable_ner: bool | None = None
+    mask_level: str | None = None
+    min_level: str = "SAFE"
+
+
+class LiveOut(BaseModel):
+    """实时跟随的当前状态。``running=false`` 表示已停止（含线程异常退出）。"""
+
+    live_id: str
+    pcap_path: str
+    source: str
+    running: bool
+    started_at: datetime
+    stopped_at: datetime | None = None
+    interval_ms: int
+    window_s: float
+    packets: int
+    segments: int
+    tasks: int
+    last_task_id: str | None = None
+    last_error: str = ""
+
+
+class LiveListOut(BaseModel):
+    sessions: list[LiveOut] = Field(default_factory=list)
+
+
+class BatchItemOut(BaseModel):
+    """批量任务里的单个文件结果：成功给 task_id，失败只给 error（不影响同批其它文件）。"""
+
+    filename: str
+    task_id: str = ""
+    content_type: str = ""
+    segments: int = 0
+    error: str = ""
+
+
+class BatchTasksOut(BaseModel):
+    items: list[BatchItemOut] = Field(default_factory=list)
+    total: int = 0
+    accepted: int = 0
+
+
+
+class PreferenceIn(BaseModel):
+    """保存主题偏好：只接受 light / dark / system，其余值由接口返回 400。"""
+
+    theme: str = Field(min_length=1, max_length=16, description="light / dark / system")
+
+
+class PreferencesOut(BaseModel):
+    operator_id: str
+    theme: str | None = Field(default=None, description="当前操作人保存的主题；null 表示没选过")
+    default_theme: str = Field(description="服务端默认主题（FLOWMASK_DEFAULT_THEME）")
+    available_themes: list[str] = Field(default_factory=list)
+
+
+class PreferenceUserOut(BaseModel):
+    operator_id: str
+    theme: str
+    updated_at: datetime
+
+
+class PreferenceUsersOut(BaseModel):
+    users: list[PreferenceUserOut] = Field(default_factory=list)
+    total: int = 0
+
+
+# ---------- AI 助手（Day 2.6 新增）----------
+#
+# 设计原则：**只接收聚合计数 / 用途标签，绝不接收原文 / masked / path**。
+# 模型增强仅限本机 Ollama 回环，数据不出机。
+
+
+class TypeCountIn(BaseModel):
+    """单类别的聚合计数（解读接口入参）。"""
+
+    model_config = ConfigDict(extra="forbid")
+    type: str = Field(min_length=1, max_length=32, description="类别键：id_card / phone / ...")
+    key: str = Field(default="", max_length=32, description="可选的细分键（如命中的规则名）")
+    count: int = Field(ge=0, le=10_000_000)
+
+
+class AssistantAdviseIn(BaseModel):
+    """统计解读入参：聚合计数，不含原文。
+
+    - ``page``：调用来源（stats 看板 / detect 内容检测页），用于调整建议侧重；
+    - ``by_level``：级别 → 命中数；
+    - ``types``：按类别聚合的命中明细（可选）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    page: Literal["stats", "detect"] = Field(description="调用来源：stats 看板 / detect 内容检测页")
+    scope: str = Field(default="all", max_length=64, description="范围标签（如时间窗/任务名），原样回显")
+    total: int = Field(ge=0, le=10_000_000, description="检测的片段总数")
+    by_level: dict[str, int] = Field(default_factory=dict, description="级别 → 命中数")
+    types: list[TypeCountIn] = Field(default_factory=list, max_length=20)
+
+
+class AdviceItem(BaseModel):
+    """一条建议：标题 + 详情 + 行动按钮文案。"""
+
+    title: str
+    detail: str
+    action: str = Field(default="", description="可选的行动按钮文案（如「前往识别规则」）")
+
+
+class AssistantAdviseOut(BaseModel):
+    """统计解读响应。"""
+
+    summary: str = Field(description="总体一句话评估")
+    tips: list[AdviceItem] = Field(default_factory=list)
+    severity: Literal["info", "warn", "high"] = Field(description="风险等级")
+    source: Literal["rules", "local-model"] = Field(
+        description="结论来源：规则引擎 / 本机模型"
+    )
+    degraded: bool = Field(default=False, description="模型调用失败回退规则引擎时为 true")
+    model: str = Field(default="", description="实际使用的模型名（规则引擎为空）")
+    generated_at: str = Field(description="ISO 时间戳")
+
+
+class RecommendIn(BaseModel):
+    """方案推荐入参：用户用途 + 输出要求，不含任何原文。
+
+    - ``purpose``：用途枚举（开发测试/教学演示/外包交付/数据分析/公开共享/其他）；
+    - ``requirements``：输出要求标签列表（keep-statistics/reversible/format-preserving/
+      irreversible/audit），不强制枚举，给前端扩展空间；
+    - ``note``：可选备注（限长 500）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    purpose: Literal["dev-test", "teaching", "outsourcing", "analysis", "public-sharing", "other"]
+    requirements: list[str] = Field(
+        default_factory=list,
+        description="输出要求：keep-statistics/reversible/format-preserving/irreversible/audit",
+    )
+    note: str = Field(default="", max_length=500)
+
+
+class RecommendOut(BaseModel):
+    """方案推荐响应。"""
+
+    strategy: str = Field(description="推荐脱敏策略：block/partial/hash/generalize/pseudonym/encrypt")
+    min_level: str = Field(description="建议的最小返回级别：SAFE/L1/L2/L3")
+    enable_l2: bool
+    enable_l3: bool
+    enable_ner: bool
+    audit_recommended: bool
+    reason: str = Field(description="推荐理由（一句话）")
+    source: Literal["rules", "local-model"]
+    degraded: bool = False

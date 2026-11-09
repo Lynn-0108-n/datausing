@@ -1,0 +1,687 @@
+# FlowMask Server（FastAPI 一体机）
+
+> 文件/文档侧的分级脱敏与审计溯源服务：**上传或粘贴 → 多模型分级识别 → 四级脱敏 → 落库留痕 → 哈希链审计**。
+> 这是需求 v2（2026-10-19）的主链路实现；仓库里的 Go 采集端与 `cmd/flowmask` 保留为「网络流量旁路」扩展能力。
+
+## 1. 现在能做什么
+
+| 能力 | 状态 | 说明 |
+| --- | --- | --- |
+| 文本/JSON/CSV/SQL/Word/PDF/图片 OCR 解析与分段定位 | ✅ | 文本整段；JSON 走 `$` 路径；CSV/TSV 每单元格 `row{n}.{列名}`；SQL 提取 DML 字符串字面量；Word 段落 `p{n}` / 表格 `table{表}.{行}.{列}`；PDF 按页 `page{n}`（依赖可选 `pdfplumber`）；图片 png/jpg/jpeg 走 OCR（`FLOWMASK_OCR_ENABLED=1` + `rapidocr-onnxruntime`） |
+| pcap 流量导入（服务端） | ✅ | 上传 pcap/pcapng → TCP 重组 + HTTP 请求解析 → 每个正文当一个片段，复用同一套识别/分级/脱敏/任务/审计；`GET /traffic/sample` 提供自带示例（`samples/demo-traffic.pcap`）；HTTPS、压缩体与分块传输暂不解析 |
+| 实时旁路（跟随抓包文件） | ✅ | 服务端持续跟随一个不断增长的抓包文件（由 dumpcap/Wireshark/自研采集器写），按「落库窗口」把新正文汇总成检测任务；**pcap 与 pcapng 都支持**（dumpcap 默认写 pcapng）；`/traffic/live*` 管理会话，演示脚本 `samples/simulate_live_traffic.py` |
+| L1 规则识别 | ✅ | 18 条规则（含 4 条自由文本 + 无冒号姓名/户名识别）+ 省/市地名库补白 + 三级敏感词表（66 词，Aho-Corasick） + 身份证 MOD 11-2 / 银行卡 Luhn / IPv4 校验；另加编码载荷解码复核（base64 / URL-safe / hex / 百分号，两层嵌套） |
+| 敏感度评分与四级分级 | ✅ | 加权最大 + 多标签共现修正 + 极端类别直达（L3/L2/L1/SAFE） |
+| 四级脱敏 + 左右对照 | ✅ | L3 高危全屏蔽（身份证/地址/医疗按结构脱敏：身份证保留前 6 位与后 4 位，地址保留省/市/区、街道起用 `*`，医疗保留字段名、字段值用 `*`）、L2 按类别遮掩（手机/邮箱留首字符；姓名全星号；银行卡占位；身份证/地址/医疗同上）、L1 警示 + 同 L2 遮掩、SAFE 原文；输出「原文哈希 + 脱敏副本 + 命中区间（spans）」供前端高亮，原文不入库 |
+| L2 语义识别（独立推理服务） | ✅ | `l2_service/` HTTP 服务：mock / ONNX int8 / auto 三后端；已用 bert-base-chinese 微调模型实测（单条 10–33 ms，CPU）；基座对比 roberta-wwm-ext 96.0% < bert 98.7%，保留 bert |
+| L1.5 实体识别（NER，可选） | ✅ | `app/identify/ner.py`：BERT4NER 补人名/地址（B-PER/B-LOC）；自由文本类型召回 22.2% → 100%（8 条探针）、公开语料压力集 200 条准确率 0.0% → 89.0%（`python -m ner_probe`），代价约 +60–70 ms/条 CPU 前向；结构化数据上会多出类别 ⇒ **服务端不做默认开启**，由每次请求的 `enable_ner` 决定（前端检测页有「自由文本 NER」开关 + 状态标签） |
+| L3 本地大模型复核 | ✅ | 独立 `l3_service` 双后端：**指令裁判**（Qwen2.5-1.5B-Instruct，按本项目四级标准直出 `level/reason/categories`，默认推荐）或**护栏**（Qwen3Guard-Gen-0.6B，Safe/Controversial/Unsafe）；只复核 L1 灰区、只升不降、默认封顶 L2，异常即降级 |
+| 差分隐私 / l-多样性 | ✅ | 算子层（Laplace 噪声、数值泛化、l-多样性检查）+ **隐私增强导出** `GET /tasks/{id}/export/privacy`：导出前对分级/类别计数加 Laplace 噪声、并给出 l-多样性检查结论（`ε`/`l` 可按请求调整，默认 1.0/3）；前端「任务与审计链」页有 ε、l 输入与「隐私导出」按钮 |
+| 后台任务 + 结果落库 | ✅ | 线程执行、`tasks`/`findings` 表、按级别/类型查询 |
+| 审计哈希链 | ✅ | HMAC-SHA256 链式签名，可校验、可导出；篡改/删除能定位到断链条目 |
+| 统计看板数据 | ✅ | 分级分布、类别 TopN、评分直方图、任务数 |
+| 单页可视化（左右对照） | ✅ | `GET /ui/` 内置页面：上传/粘贴 → 左原文高亮、右脱敏副本、分级统计，无需装前端工具链 |
+| 正式前端（Vue3 + Element Plus + ECharts） | ✅ | `web/`：7 个页面（内容检测·左右对照/批量/场景/动态脱敏 / 流量导入 / 检测记录与审计链 / 统计看板 / 识别规则 / 设置 / 帮助），`npm run build` 后由服务端挂在 `/app`；未构建时自动回落到 `/ui/` |
+| 自定义规则 | ✅ | 增删启停 + 正则合法性校验，库内持久化 |
+| 场景模式 | ✅ | 内置医疗 / 政务 / 电商 / 金融 / HR / 审计 6 个场景，一键套用推荐级别、脱敏策略与识别开关；自定义场景存前端 localStorage |
+| 导出侧多策略脱敏 | ✅ | `/detect/export`、`/detect/file/export` 支持 `block` / `partial` / `hash` / `generalize` / `pseudonym` / `encrypt` 六种策略，与四级分级正交 |
+| 评测跑分 | ✅ | 自建标注集 **351 条**（策展 75 + 生成 225 + 稀有类别补样 51，id/内容唯一、与训练集 0 重叠）+ 200 条 NER 压力集；L1 only 准确率 94.0%、自由文本压力集纯 L1 52.5%，接 L2 后 99.7%、安全误报率 20.8%→0.0%，`--compare-l2` 一条命令复现 |
+| 浅色 / 深色主题 | ✅ | 顶栏开关一键切换，首次跟随系统外观、手动选择后记住；**偏好可按操作人存服务端**（换浏览器/换机器仍生效，服务端 `FLOWMASK_DEFAULT_THEME` 定默认）；页面、表格与 ECharts 图表同步换肤，`?theme=dark` 可临时覆盖（截图/演示用） |
+| 批量检测（多文件） | ✅ | `POST /tasks/batch` 一次最多 20 个文件，一个文件一个任务；单个坏文件只在结果里标错，不影响同批其它文件 |
+| 性能基准 | ✅ | `server/bench.py` 本机实测：L1 **0.022 ms**/条（≈4.4 万条每秒）、端到端 `/detect` **2.18 ms**（≈459 请求/秒）、L2 int8 单条 7.4→4.1 ms、L3 1.5B **1.16 s**/条；报告 `docs/性能报告.md` 可一条命令复跑 |
+| 动态脱敏视图（授权切换） | ✅ | `POST /api/v1/dynamic/render`：未授权返回脱敏副本、授权返回原文并写审计链；`GET /dynamic/policy` 给出四级策略表；内置页面「动态脱敏」页签可直接演示 |
+| L2 训练侧（RoBERTa 多标签） | ✅ | `l2_training/`：11 标签（10 敏感 + benign）、自举数据（默认 800 条，含 30% 困难负例）、弱标注、数据体检、微调 + ONNX 导出；本机真模型 macro-F1 **0.9844**、benign F1 **0.954** |
+| L3 训练侧（LoRA 指令微调） | ✅ | `l3_training/`：351 条评测集金标 → 指令样本（级别 + 类别 + 模板理由），LoRA 微调 Qwen2.5-1.5B；裁判单任务准确率 **60.0% → 76.2%**（80 条分层样本），合并成完整权重后 `FLOWMASK_L3_MODE=instruct` 直接加载 |
+
+## 2. 快速开始
+
+环境：Python 3.11+（本机 3.12.10）。依赖只有 FastAPI 全家桶，存储用标准库 `sqlite3`（无 ORM、无 CGO）。
+
+### 2.1 一键启动（推荐）
+
+```powershell
+cd server
+pip install -r requirements.txt          # 运行依赖（固定版本）；开发/测试用 requirements-dev.txt
+
+# Windows：双击或命令行都行（内部已用 -ExecutionPolicy Bypass，绕过 PS 执行策略限制）
+scripts\start_local.cmd
+scripts\start_local.cmd -WithL2 -EnableNer        # 叠加 L2 语义模型 + 自由文本 NER
+scripts\start_local.cmd -WithL2 -WithL3 -L3Device cuda
+scripts\stop_local.cmd                            # 停止全部
+
+# Linux / macOS
+./scripts/start_local.sh
+./scripts/start_local.sh --with-l2 --ner
+./scripts/stop_local.sh
+```
+
+脚本会：加载 `.env`（可从 `.env.example` 复制）→ 按开关拉起 L2/L3 → 起主服务 → 等 `/api/v1/health` →
+打印入口并（默认）打开浏览器；pid/日志写在 `server/data/run/`。参数见第 11 章。
+
+### 2.2 手动启动（分步调试用）
+
+```powershell
+# 默认套件：未装可选依赖 / 未生成评测集时排除对应测试文件
+python -m pytest -o addopts="" -q --ignore=tests/test_bench.py --ignore=tests/test_desktop.py --ignore=tests/test_ner_probe.py --ignore=tests/test_eval_dataset.py    # 443 个用例（440 通过 + 3 跳过）
+python -m bench --markdown-out ../docs/性能报告.md   # 性能基准（L1/端到端/L2；加 --l3-endpoint 测 L3）
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
+# 构建正式前端（可选，需 Node 18+；产物在 ../web/dist）
+cd ../web && npm install && npm run build && cd ../server
+# 打开 http://127.0.0.1:8090/app/ 用正式前端（构建过时根路径自动跳这里）
+# 或 http://127.0.0.1:8090/ui/ 用零依赖内置单页；接口文档在 /docs
+# 想支持 PDF：pip install pdfplumber（未安装时 /formats 会提示，上传 PDF 返回 415）
+# 想支持图片 OCR：pip install rapidocr-onnxruntime，并设 FLOWMASK_OCR_ENABLED=1
+```
+
+一次最小闭环（PowerShell）：
+
+```powershell
+# 1) 即时检测（不落库，用于左右对照）
+curl.exe -s -X POST http://127.0.0.1:8090/api/v1/detect -H "Content-Type: application/json" `
+  -d '{\"text\":\"客户张三，手机 13800138000，身份证 11010519491231002X\"}'
+
+# 2) 建任务（带审计留痕）
+curl.exe -s -X POST http://127.0.0.1:8090/api/v1/tasks/text -H "Content-Type: application/json" `
+  -d '{\"text\":\"客户张三，手机 13800138000\"}'
+
+# 3) pcap 流量导入（HTTP 正文 → 同一套识别/分级/审计）
+curl.exe -s -F "pcap=@samples/demo-traffic.pcap" "http://127.0.0.1:8090/api/v1/traffic/import"
+curl.exe -s -o demo.pcap "http://127.0.0.1:8090/api/v1/traffic/sample"
+
+# 4) 查结果 / 统计 / 校验审计链 / 导出
+curl.exe -s "http://127.0.0.1:8090/api/v1/tasks/1/findings"
+curl.exe -s "http://127.0.0.1:8090/api/v1/stats"
+curl.exe -s "http://127.0.0.1:8090/api/v1/audit/verify"
+curl.exe -s -o findings.jsonl "http://127.0.0.1:8090/api/v1/tasks/1/export?format=jsonl"
+```
+
+## 3. 多模型协同（L2 推理服务）
+
+L2 跑在独立进程里（模型体积与依赖都重），一体机按 HTTP 契约调用、失败自动降级：
+
+```powershell
+# 终端 A：起 L2 服务（默认 mock 后端，零模型依赖；接真模型见 l2_service/README.md）
+cd server && python -m l2_service            # http://127.0.0.1:8091
+
+# 接真模型（本仓实测过的路径）：bert-base-chinese 微调 + ONNX int8
+python -m l2_training dataset --out data/l2_training.jsonl --count 800
+python -m l2_training train --dataset data/l2_training.jsonl --base-model models/bert-base-chinese
+FLOWMASK_L2_MODE=onnx FLOWMASK_L2_MODEL_DIR=l2_models/bert-sens-onnx python -m l2_service
+
+# 终端 B：让一体机启用 L2
+$env:FLOWMASK_ENABLE_L2 = "1"
+$env:FLOWMASK_L2_ENDPOINT = "http://127.0.0.1:8091/v1/classify"
+python -m uvicorn app.main:app --port 8090
+```
+
+协同规则（`app/identify/pipeline.py`）：只对 L1 命中的样本升级；L2 补类别加少量分；
+`benign≥0.65` 时压分抑制"文档/测试示例"这类形似误报（证件等直达类要 `≥0.75` 才压，且取消 `direct`）；
+服务异常只标记 `degraded`，结论继续用 L1。阈值可用环境变量覆盖（`FLOWMASK_L2_BENIGN_MIN`、
+`FLOWMASK_L2_BENIGN_DIRECT_MIN`），阈值是在 75 条留出集上调出来的；扩样到 351 条后误报仍为 0%，高危漏检保持 0%。
+
+实测增益（真模型，**351 条**评测集：策展 75 + 生成 225 + 稀有类别补样 51，训练数据与评测集隔离）：
+
+| 指标 | L1 only | L1 + L2（真模型） | 变化 |
+| --- | ---: | ---: | ---: |
+| 分级准确率 | 94.3% | **100.0%** | ↑ +5.7% |
+| 类别 Micro-F1 | 0.888 | 0.888 | → 持平（L2 主要修分级，不新增类别） |
+| 安全误报率 | 20.8% | **0.0%** | ↓ -20.8% |
+| 高危漏检率 | 0.0% | 0.0% | → 稳定 |
+
+> 训练/导出细节（困难负例、`labels.json` 回退、`dynamo=False`、padding mask）见
+> [`l2_training/README.md`](l2_training/README.md) 与 [`l2_service/README.md`](l2_service/README.md)。
+
+基座对比（同期实测，同一份 800 条自举数据、同一套调参）：`chinese-roberta-wwm-ext` 分级准确率 **96.0%**，同权重 fp32 ONNX 也是 96.0%（排除 int8 量化因素），阈值 0.40–0.85 扫描无变化 ⇒ 在自举数据规模下**换更大基座没有收益，保留 bert-base-chinese**。
+
+### 3.0 L1 自由文本规则（无字段名也能召回）
+
+`name_kv`/`address_kv` 依赖「姓名：」「地址：」这类字段名，叙述文本里「张三昨天从福州赶过来」一条都不命中。
+规则层补了 4 条**自由文本**规则（置信度刻意压低，只负责召回，级别仍由评分公式决定）：
+
+| 规则 | 命中条件 | 例子 |
+| --- | --- | --- |
+| `name_free_role` | 角色词（同事/客户/联系人…）后紧跟 2~4 字姓名 | 客户王小明办理了新装 |
+| `name_free_sentence` | 句首姓名 + 动作/时间词（反馈/提交/刚/已…） | 萧亚轩反馈仓库缺货 |
+| `name_free_action` | 「由/请/向/给」+ 姓名 + 动作（整理/补充/提交…） | 这份材料由魏民整理 |
+| `address_free` | 省/市 + 区/县 + 路/街/大道 + 门牌号 | 他住在北京市海淀区中关村大街 1 号 |
+
+姓名字段用「常见姓氏 + 停用字」双校验压误报（`valid_free_name`）；句中的「住在」用零宽断言吃掉，
+不进入脱敏区间。实测：**200 条 weibo_ner 压力集上纯 L1 准确率 0.0% → 52.5%（仅自由文本规则）→ 61.0%（叠加地名库）**（人名覆盖 96/109，
+地址多为湖泊/国家等非标准地名，仍留给 NER）；主评测集 L1 列准确率 **94.3%**、类别 Micro-F1 **0.888**（编码载荷解码另见 3.0.2）。
+
+### 3.0.2 编码载荷解码复核（base64 / 百分号编码）
+
+真实泄露常常不是「明文发出去」，而是编码后再发：`{"phone":"13800138000"}` 做一次 base64 就变成
+`eyJwaG9uZSI6IjEzODAwMTM4MDAwIn0=`——正则看不见手机号，但数据本体已经出去了。L1 在规则识别后追加
+一层**解码复核**，命中区间仍落在编码片段上（脱敏替换整段编码，不在正文里凭空插入字符）。
+
+- 编码识别：**base64（标准 + URL-safe 字母表，可缺省 padding）**、**十六进制串（连写或 `\xNN` 转义）**、
+  **URL 百分号编码（≥2 个 `%XX`）**，并支持**最多两层嵌套**（`base64>percent`、`base64>base64`）；候选片段按
+  「hex 转义 > 纯 hex > 百分号 > base64」优先级扫描，避免一串 base64 被 hex 先解开、把编码链标错；
+- 解码后必须「像文本」（可打印占比 ≥ 90%、含字母/数字/汉字）才复核，随机二进制/ID 串/短 hex 不会误报；
+- 复核命中按层数折价（每层 ×0.95）后参与评分；**但层数只削弱证据强度、不降低严重度**——底层证据够硬时
+  仍走「一票高危」直达 L3（`Hit.direct_hint`，身份证/银行卡/密钥二次编码照样判 L3）；
+- 开关：默认开启，`FLOWMASK_DISABLE_DECODE=1` 可关；也可在代码里 `analyze(text, enable_decode=False)` 单次关闭。
+
+实测（351 条主评测集）：`L2-049`（base64 编码的联系方式）由判错变为正确，`L1 only` 准确率
+**94.0% → 94.3%**、`L1+L2` 由 **99.7% → 100.0%**（类别 Micro-F1 0.888，安全误报仍 0.0%——扩展解码没有引入误报）。
+覆盖见 `tests/test_decode.py`（16 例：base64 / URL-safe / hex / hex 转义 / 百分号 / 两层嵌套 / 负例 / 开关）。
+
+### 3.0.3 地名库补白（gazetteer）
+
+自由文本里常常只出现一个地名，既没有 `地址：` 字段名、也没有完整的「省/市/区/路/号」层级：
+
+    他昨天从湖南过来，住了一晚就走了
+
+规则层为此加了一层**行政区地名库**（34 个省级 + 50 个主要城市，`app/identify/gazetteer.py`）。命中必须带依据：
+**行政后缀**（省/市/区/县/路/街/镇/村/号/自治区/特别行政区）或 **方位词**（在/到/去/往/从/来自/位于/住在/发往…）。
+「看到/想到/收到」里的「到」是动词后缀，用前置字表排除，避免把普通句子误判成地址。
+
+- 类别 `address`、权重 0.50 / 置信度 0.65（与 `address_kv` 同量级，**只补召回、不抬级别**）；
+- 与已有命中重叠时保留更精确的那条（字段名规则优先），不会重复计分；
+- 开关：默认开启，`FLOWMASK_DISABLE_GAZETTEER=1` 可关；也可 `analyze(text, enable_gazetteer=False)` 单次关闭；
+- 实测：压力集纯 L1 准确率 **52.5% → 61.0%**、Micro-F1 **0.634 → 0.709**；主评测集 `L1+L2` 仍 **100.0%**、
+  安全误报 **0.0%**（没有引入新误报）；
+- 覆盖见 `tests/test_gazetteer.py`（17 例：方位词/后缀正例、泛称误报、「看到」类负例、重叠与排序、开关）。
+
+### 3.0.4 敏感词表（三级知识库，Aho-Corasick）
+
+规则抓「值」，词表抓「主题」：正文里出现「身份证」「病历号」「交易流水」这类**类别词**时，说明这段内容在谈敏感主题，
+但类别词本身不是敏感值。词表把它们作为**低权重旁证**并入 L1 证据链，用于解释「为什么触发」与给 L2/L3 复核提供线索。
+
+- 知识库：`app/identify/knowledge/*.yaml` 三级 —— 法规（32 条：身份证/护照/行踪轨迹/基因/生物识别/宗教信仰/犯罪记录/密钥…）、
+  行业（20 条：病历号/住院号/交易流水/征信/学号/户籍…）、企业（14 条示例：内部审计/薪酬/客户名单/源代码/堡垒机…，可替换成本单位词表，重启生效）；
+- 实现：`app/identify/keywords.py`，启动时 YAML → Aho-Corasick 自动机（装了 `pyahocorasick` 走 C 扩展，没装自动退回同语义的纯 Python 实现）；
+  英文词按整词边界匹配（`token` 不命中 `tokenize`）；
+- 口径：单条词默认权重 0.30 / 置信度 0.60，**关键词加分封顶 +0.10**，只靠类别词不会把 SAFE 顶到 L1；
+  词表命中不参与脱敏与高亮（否则会把「身份证」三个字换成 `[已屏蔽:身份证号]`），只留在 `hits` 里（`rule=kw-<tier>`）作证据；
+- 接口：`GET /api/v1/keywords?tier=&limit=` 返回词表与三级分布；`/health` 的 `keywords` / `keyword_tiers` 给出加载数量；
+- 开关：默认开启；`FLOWMASK_DISABLE_KEYWORDS=1` 全局关，`analyze(..., enable_keywords=False)` 或请求体 `enable_keywords` 单次关；
+- 评测：351 条主集上 L1-only 准确率 **94.3% → 94.3%**、类别 Micro-F1 **0.888 → 0.888**（中性、无回归）；
+- 覆盖：`tests/test_keywords.py`（12 例：三级加载、非法条目、重叠与整词边界、封顶加分、开关、接口）。
+
+### 3.1 L1.5 实体识别（NER，可选）
+
+规则和 L2 都依赖上下文：新增的 L1 自由文本规则能兜住一部分句首/角色/动作句式里的姓名（见 3.0），
+但自由叙述里的**地名、以及没有动作词的姓名**仍然抓不到。可选 NER 层补的就是这块：
+
+- 实现：`app/identify/ner.py`（`TokenNerDetector` 通用 HF 序列标注 / `RaNerDetector` ModelScope 管道），
+  默认权重 `shibing624/bert4ner-base-chinese`（406 MB，不入库），B-PER/B-LOC → 姓名/地址；
+- 挂载点：`pipeline._run_chain` 在 L1 之后补命中，跳过与已有命中重叠的区间（不重复计分），异常一律降级；
+- 开关：`FLOWMASK_ENABLE_NER=1` + `FLOWMASK_NER_MODEL_DIR=models/bert4ner`
+  （`FLOWMASK_NER_BACKEND=token|raner`、`FLOWMASK_NER_DEVICE=cpu|cuda`）：服务端开关只决定「是否加载/是否默认启用」，
+  **每次请求可用 `enable_ner` 显式覆盖**（true 打开、false 关闭、缺省跟服务端）；`/detect`、`/detect/file`、`/tasks/text`、`/traffic/*` 均支持；
+  `/health` 的 `ner` / `ner_backend` 告诉前端开关是否可用；
+- 探针（`python -m ner_probe --model-dir models/bert4ner`，8 条自由叙述 / 18 个标注类别）：
+  类型召回 **22.2% → 100.0%**，8/8 样本提升；
+- 同一开关在 **351 条**评测集上：分级准确率不变（100.0%）、类别 Micro-F1 **0.888 → 0.955**
+  （代价是多出若干 FP 类别）、L1 列 p95 时延 0.07 → 71.4 ms；
+- **公开语料压力集**（`eval/ner_stress.jsonl`，200 条 weibo_ner 自由文本，L1 规则抓不到）：
+  纯 L1 准确率 **61.0%** / Micro-F1 **0.709**（关掉地名库时 52.5% / 0.634）→ 开 NER 后 **90.0%** / **0.942**、p95 29.7 ms
+  （剩 4 条错例是语料标注噪声，如“电器城/游乐园/宿舍”这类非标准地点）；
+- 结论：结构化数据上 NER 主要补召回、不改变分级，所以**默认关闭**；自由文本场景按请求打开
+  （`http://127.0.0.1:8090/app/?ner=1#detect` 会带样例文本自动演示）。
+
+## 4. L3 大模型复核（指令裁判 / 护栏双后端）
+
+第三级识别跑在独立进程里，职责是「复核 + 解释」，不重新定级。两种后端按需选：
+
+| 模式 | 权重 | 输出 | 说明 |
+| --- | --- | --- | --- |
+| `FLOWMASK_L3_MODE=instruct`（**推荐**） | Qwen2.5-1.5B-Instruct（3.0 GB） | 一行 JSON：`{"level":"L3\|L2\|L1\|SAFE","categories":[...],"reason":"…"}` | 按本项目四级标准直接给分级建议与中文理由 |
+| `FLOWMASK_L3_MODE=hf` | Qwen3Guard-Gen-0.6B（1.5 GB） | `Safe / Controversial / Unsafe` | 内容安全口径，对中文 PII 偏保守（几乎不判 Unsafe）；**权重不随仓库分发，需要时用上面的 ModelScope 命令按需下载** |
+| `FLOWMASK_L3_MODE=mock` | 不需要权重 | 启发式 | 测试 / 无权重演示 |
+
+```powershell
+# 1) 依赖 + 权重
+python -m pip install torch transformers modelscope
+python scripts/download_models.py --list        # 看有哪些权重、多大、给谁用（已下载的标 [ok]）
+python scripts/download_models.py --only l3     # 只下 L3 指令裁判（3.0 GB，权重不随仓库分发）
+
+# 2) 起服务（默认 127.0.0.1:8092；GPU 用 FLOWMASK_L3_DEVICE=cuda）
+$env:FLOWMASK_L3_MODE = "instruct"
+$env:FLOWMASK_L3_MODEL_DIR = "models/qwen2.5-1.5b-instruct"
+cd server && python -m l3_service
+
+# 3) 让一体机启用 L3
+$env:FLOWMASK_ENABLE_L3 = "1"
+$env:FLOWMASK_L3_ENDPOINT = "http://127.0.0.1:8092/v1/judge"
+```
+
+协同策略（`app/identify/pipeline.py`，全部可用环境变量改）：
+
+- 只对 **L1 命中且分数落在灰区（0.25~0.85）、且不是直达高危** 的样本调用，触发面窄；
+- **只升不降**，且**所有升级（含 Unsafe）默认封顶 L2**（`FLOWMASK_L3_MAX_TARGET=L3` 才允许升高危）；
+- 采信指令模型的分级建议（`FLOWMASK_L3_TRUST_LEVEL_HINT=1`，默认开）；
+- 类别感知（模型点出 PII 就抬到中危）**默认关**（`FLOWMASK_L3_CATEGORY_RAISE=1` 开启）；
+- 服务超时/不可用 → `degraded=true`，保留 L1/L2 结论，不阻塞主链路。
+
+**策略矩阵**（75 条策展子集、同一 L3 端点；`cd server && python -m l3_measure` 复现；扩样到 351 条后 L3 仍不改变分级，见 §5）：
+
+| 口径 | 分级准确率 | Macro-F1 | 判错 | 结论 |
+| --- | ---: | ---: | ---: | --- |
+| 只认 Unsafe，封顶 L2（**当前默认**） | **98.7%** | 0.988 | 1 | 与 L1+L2 持平，不扣分 |
+| 采信分级建议，封顶 L2 | **98.7%** | 0.988 | 1 | 同上 |
+| 类别感知（PII → 至少中危） | 85.3% | 0.684 | 11 | name/email/address 类低危全被抬成中危，**关** |
+| 类别感知 + 分级建议 | 85.3% | 0.684 | 11 | 同上 |
+| 允许抬到 L3 | 84.0% | 0.671 | 12 | 连「诊断: 2型糖尿病」都被判 Unsafe/L3，**关** |
+
+指令裁判真权重实测（策展 75 条子集，RTX 5060 8GB / CUDA bf16，单条约 1.0~1.3 s；首次调用含加载约 10 s。351 条扩样集上 L1+L2 与 L1+L2+L3 同为 **100.0%**）：
+
+| 指标 | 数值 |
+| --- | ---: |
+| L3 触发（finding 级） | 47 次（评测集敏感样本密集；真实流量远低于此） |
+| 判定分布 | Controversial 44 / Unsafe 2 / Safe 1；分级建议 L1 41 / L2 3 / L3 2 / SAFE 1 |
+| 对分级的影响 | 0 次升/降级（默认口径），只贡献解释与证据 |
+| 分级准确率 | 75 条子集 **98.7%**；351 条扩样集上 L1+L2 与 L1+L2+L3 同为 **100.0%**（L3 不扣分） |
+
+> 4B 复核结论：Qwen3Guard-Gen-4B（8.56 GB 权重）同口径 Unsafe 仍为 0、Controversial 9→5、
+> 平均延迟 640.8 ms→3413.7 ms（CPU bf16）。它是**内容安全**分类器，对中文 PII 只给
+> Controversial/PII，换 4B 对分级零收益、更慢，因此不采用；要让 L3 真正贡献召回，
+> 应按本域标注微调（可复用 `l2_training` 的弱标注/训练管线）或换更大指令模型。
+
+### 4.1 L3 训练侧（LoRA 指令微调）
+
+L3 的定位是「复核 + 解释」，但零样本 1.5B 裁判对真实 PII 只会给模糊结论（见上面策略矩阵）。
+`l3_training/` 给它补上本域监督：把评测集金标转成指令样本，LoRA 微调后精度明显提升。
+
+```powershell
+cd server
+python -m l3_training dataset          # 351 条金标 → data/l3_training.jsonl（train 316 / val 35）
+python -m l3_training dry-run          # 数据体检：级别覆盖、目标可解析性
+pip install peft                       # torch/transformers 已在 requirements-ml.txt
+python -m l3_training train --epochs 1 --max-length 768   # GPU 74.5 s（8GB 显存够）
+python -m l3_training merge --out models/qwen2.5-1.5b-sens
+```
+
+**裁判单任务实测**（80 条分层样本，同一套 prompt 与解析）：
+
+| 模型 | 分级准确率 | L3 | L2 | L1 | SAFE | 均延迟 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Qwen2.5-1.5B-Instruct 零样本 | 60.0% | 60% | 35% | 100% | 45% | 918 ms |
+| LoRA 微调 qwen2.5-1.5b-sens | **76.2%** | **90%** | **80%** | 45% | **90%** | 1298 ms |
+
+**接回管道的结论（重要，答辩要说实话）**：
+
+- 微调提升的是「裁判本身」，不等于「端到端分级更准」：管道里 L1+L2 已 **100.0%**，
+  而裁判单任务只有 76.2%，让它覆盖级别反而会往下拉（采信分级建议时 100.0% → 91.2%，
+  主要是 L1 被抬成中危；关掉 `FLOWMASK_L3_TRUST_LEVEL_HINT` 后回到 99.4%）；
+- 所以默认策略保持不变：**L3 只解释/兜底，不覆盖级别**；微调权重作为「自由文本、解释质量」的可选升级，
+  用 `FLOWMASK_L3_MODEL_DIR=models/qwen2.5-1.5b-sens` 切换即可；
+- 训练脚本与推理共用同一段 `INSTRUCT_PROMPT` 和同一行 JSON 契约，接线上零代码改动。
+
+- 复现上面的对比：`python l3_judge_compare.py --base http://127.0.0.1:8092/v1/judge --tuned http://127.0.0.1:8093/v1/judge --limit-per-level 20`（两个 l3_service 分别加载基座与微调权重）。
+
+## 5. 评测跑分
+
+```powershell
+cd server
+python -m app.evaluate     # 默认 L1 only，几秒钟出结果
+```
+
+- 评测集：`eval/dataset.jsonl`（**351 条** = 策展 75 + 生成 225 + 稀有类别补样 51，覆盖 text/JSON/CSV/SQL、文档/测试示例负样本与困难样本；id/内容唯一、与训练集 0 重叠），可 `python eval/build_dataset.py` 复现；标注口径见 [`eval/README.md`](eval/README.md)；
+- 报告：自动写入 [`docs/评测报告.md`](../docs/评测报告.md)——总体指标、四级混淆矩阵、分级/类别 P-R-F1、判错样本清单；
+- 当前（L1 only，351 条）：分级准确率 **94.3%**、Macro-F1 **0.946**、类别 Micro-F1 **0.888**、高危漏检率 **0.0%**、L1 p95 **0.12 ms**；
+- 对比多模型协同：`python -m app.evaluate --compare-l2 --compare-l3 --l2-endpoint http://127.0.0.1:8091/v1/classify`
+  → L1 only **94.3%** / **L1+L2（真模型）100.0%**（安全误报率 20.8% → 0.0%，高危漏检率保持 0.0%；再加 L3 仍 100.0%）；
+- 阈值消融：`FLOWMASK_L2_BENIGN_MIN=0.9` 会退回 L1-only 行为，可用于现场对比"接/不接模型"的收益；
+
+### 接口一览（前缀 `/api/v1`）
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/`、`/ui/` | 根路径 307 跳到内置单页界面（左右对照 + 分级统计） |
+| GET | `/health` | 健康检查（版本、时间、L2/L3 是否启用） |
+| POST | `/detect` | 即时检测文本（不落库） |
+| POST | `/detect/file` | 即时检测上传文件（multipart） |
+| GET | `/formats` | 支持的格式、已接入/待接入、各格式是否可用 |
+| GET | `/traffic/formats` | 流量导入支持的格式与限制（pcap/pcapng、上传上限） |
+| POST | `/traffic/import` | 上传 pcap：解析 HTTP 正文并创建检测任务（201 + 任务 ID 与解析统计） |
+| GET | `/traffic/sample` | 下载自带示例抓包 `demo-traffic.pcap`（3 条会话，含 L3/L2/SAFE） |
+| POST | `/traffic/ingest` | 外部推送正文片段（Go 采集端/Agent 用），复用同一套识别与落库 |
+| POST | `/traffic/live/start` | 开始实时跟随：`{pcap_path, interval_ms, window_s, ...}` → 返回会话（201） |
+| GET | `/traffic/live` | 实时会话列表（报文/片段/窗口任务数、最近任务、最近错误） |
+| POST | `/traffic/live/{live_id}/stop` | 停止跟随（会把未写完的窗口先落库） |
+| DELETE | `/traffic/live` | 清理已停止的会话 |
+| POST | `/tasks` | 上传文件建任务 |
+| POST | `/tasks/text` | 粘贴文本建任务 |
+| POST | `/tasks/batch` | 批量提交：一次最多 20 个文件，单文件失败不拖垮整批 |
+| GET | `/tasks` / `/tasks/{id}` | 任务列表 / 详情 |
+| GET | `/tasks/{id}/findings` | 任务结果（`level`/`page`/`page_size`） |
+| GET | `/tasks/{id}/export?format=jsonl\|json\|csv\|sql` | 导出脱敏结果 |
+| GET | `/tasks/{id}/export/privacy?format=jsonl\|json&epsilon=&l=` | 隐私增强导出（DP 计数 + l-多样性） |
+| GET | `/findings` / `/findings/{id}` | 全量结果查询 |
+| GET | `/stats` | 看板：分级分布、类别 TopN（`by_type` 每项含 `key` 中文名 / `type` 英文键 / `count`）、评分直方图 |
+| GET/POST/PATCH/DELETE | `/rules` `/rules/{id}` | 规则查询、新增（`id` 可省略，由规则名生成）、启停、删除（内置规则可启停不可删） |
+| GET | `/audit` | 审计日志分页 |
+| GET | `/audit/verify` | 校验哈希链（返回是否完整、断链位置） |
+| GET | `/dynamic/policy` | 动态脱敏策略表（四级各自的未授权/授权行为） |
+| POST | `/dynamic/render` | 动态脱敏渲染：`{text, authorized, mask_level?}`；每次渲染写审计链 |
+| GET | `/audit/export?format=jsonl\|json\|csv` | 审计导出 |
+| GET | `/preferences` | 当前操作人的界面偏好（按 `X-Operator-Id` 区分；返回 `operator_id`/`theme`/`default_theme`/`available_themes`，`theme` 为空表示沿用默认） |
+| GET | `/preferences/users` | 已保存过偏好的操作人列表（前端顶栏「用户」下拉用） |
+| PUT | `/preferences` | 保存界面偏好：`{"theme": "light\|dark\|system"}` |
+| DELETE | `/preferences` | 清除当前操作人偏好（回落服务端默认主题） |
+| GET | `/keywords` | 当前生效的敏感词表（`tier`/`limit` 过滤；返回总条目数与三级分布） |
+
+鉴权：设置 `FLOWMASK_API_TOKEN` 后，`/api/v1/*` 需 `Authorization: Bearer <token>`；留空即本机演示模式。
+
+## 6. 隐私增强导出（差分隐私 + l-多样性）
+
+导出「给外部看的统计/结果」时，除了脱敏，还要防「从统计值反推个体」。`app/privacy.py` 把结果导出升级成隐私增强导出：
+
+- **差分隐私**：对导出报文的**分级计数与类别计数**加 Laplace 噪声（敏感度 1，`ε` 可调，默认 1.0；`ε` 越小噪声越大、隐私越强）；行级明细仍只输出脱敏副本；
+- **l-多样性**：按「分级 × 类别」分组检查等价类是否 ≥ `l` 个不同取值（`l` 默认 3），不满足时在 `l_diversity` 里给出违规分组与条数，供人工复核；
+- **可审计**：响应头 `X-FlowMask-Privacy: laplace+l-diversity`；`ε`、`l` 与结论随导出一起返回。
+
+```powershell
+# 摘要（JSON：meta.privacy 里是 DP 计数与 l-多样性报告，findings 是脱敏明细）
+curl.exe -s "http://127.0.0.1:8090/api/v1/tasks/1/export/privacy?format=json&epsilon=1.0&l=3"
+# 下载隐私增强结果（jsonl 首行 meta 带 privacy 块）
+curl.exe -s -o privacy.jsonl "http://127.0.0.1:8090/api/v1/tasks/1/export/privacy?format=jsonl&epsilon=0.5&l=5"
+```
+
+参数范围：`ε ∈ [0.05, 10]`、`l ∈ [1, 20]`，非法值 400；任务不存在 404。
+口径说明：DP 作用在**导出统计**上，不改变页面实时检测结果；行级明细的隐私保护仍由四级脱敏负责，原文不入库。
+
+## 7. 实时旁路（跟随 pcap 文件）
+
+服务端**不直接抓网卡**：Npcap/libpcap 需要 C 绑定与管理员权限，会破坏"纯标准库、可移植、零外网"的部署口径。
+抓包交给外部工具持续写文件，服务端只做「文件增长 → 增量解析 → 按窗口检测」：
+
+```powershell
+# 终端 1：起服务
+python -m uvicorn app.main:app --port 8090
+
+# 终端 2：模拟持续抓包（每 1s 追加一条含敏感正文的 HTTP 会话）
+python samples/simulate_live_traffic.py --interval 1.0 --rounds 20
+
+# 终端 3：开始跟随（也可以直接在 /app/ → 流量导入 → 实时旁路 点按钮）
+curl.exe -s -X POST http://127.0.0.1:8090/api/v1/traffic/live/start ^
+  -H "Content-Type: application/json" -d "{"pcap_path":"data/live.pcap","interval_ms":500,"window_s":2.0}"
+```
+
+真实场景把 `pcap_path` 指向 dumpcap 的滚动输出即可，例如：
+
+```powershell
+dumpcap -i 1 -w data/live.pcapng -b filesize:10240   # pcapng 同样是支持的格式
+```
+
+语义与边界：
+
+- **窗口 = 一个任务**：`window_s` 到了就把这段时间新出现的正文汇总成一个检测任务，结果自动进「任务与审计链」「统计看板」，审计链照常逐条追加；
+- **去重**：同一 HTTP 请求（方法+路径+正文）只检测一次，跨窗口重复的握手/重传不会重复报；
+- **延迟**：最坏 = `interval_ms` + `window_s`，默认约 2.5 s；
+- **容器格式**：经典 pcap 与 pcapng 都支持（`dumpcap`/Wireshark 默认导出 pcapng）；pcapng 按块增量解析，
+  支持 SHB / IDB / EPB / SPB 与大小端，接口链路类型不是以太网时跳过；
+- **不支持的**：HTTPS 密文、压缩体、分块传输；
+- **权限**：只允许跟随 `data_dir` 下的文件（默认 `data/`），避免任意文件读取。
+
+## 8. 配置（环境变量）
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `FLOWMASK_DATA_DIR` | `server/data` | 数据目录 |
+| `FLOWMASK_DB_PATH` | `<data_dir>/flowmask.db` | SQLite 路径 |
+| `FLOWMASK_API_TOKEN` | 空 | 非空则开启 Bearer 鉴权 |
+| `FLOWMASK_AUDIT_SECRET` | `flowmask-demo-secret` | 审计链 HMAC 密钥（演示值，生产必须换） |
+| `FLOWMASK_ENABLE_L2` | `false` | 是否升级 L2 语义识别 |
+| `FLOWMASK_L2_ENDPOINT` | `http://127.0.0.1:8091/v1/classify` | BERT 推理服务地址 |
+| `FLOWMASK_ENABLE_L3` | `false` | 是否启用 L3 大模型复核 |
+| `FLOWMASK_L3_MODE` | `http` | `http` 调独立服务；`ollama` 直连 Ollama |
+| `FLOWMASK_L3_ENDPOINT` | `http://127.0.0.1:8092/v1/judge` | L3 服务地址（`l3_service`） |
+| `FLOWMASK_L3_MODEL` | `qwen3guard-gen-0.6b` | 模型名（仅展示/日志用） |
+| `FLOWMASK_L3_MODEL_DIR` | `server/models/qwen3guard-gen-0.6b` | 本地权重目录（ModelScope 下载到此处；instruct 模式指向 `qwen2.5-1.5b-instruct`） |
+| `FLOWMASK_L3_DEVICE` / `FLOWMASK_L3_DTYPE` | `auto` / `auto` | `cuda`/`cpu`；`auto`=GPU bf16、CPU fp32 |
+| `FLOWMASK_L3_MAX_TARGET` | `L2` | L3 升级上限；设 `L3` 才允许抬到高危 |
+| `FLOWMASK_L3_TRUST_LEVEL_HINT` | `1` | 是否采信指令模型的分级建议 |
+| `FLOWMASK_L3_CATEGORY_RAISE` | `0` | 类别感知（点出 PII 即抬中危）；实测会显著降准确率，默认关 |
+| `FLOWMASK_L2_TIMEOUT_S` / `FLOWMASK_L3_TIMEOUT_S` | `0.5` / `5.0` | 秒；超时即降级并标记 `degraded` |
+| `FLOWMASK_MAX_UPLOAD_MB` | `20` | 上传大小上限 |
+| `FLOWMASK_CORS_ORIGINS` | 本机 5173/8080 | 允许跨域的前端地址，逗号分隔 |
+| `FLOWMASK_DISABLE_DECODE` | 空（开启） | 设为 1 关闭 base64 / 百分号编码的载荷解码复核 |
+
+## 9. 代码结构
+
+```text
+server/
+  app/
+    main.py            FastAPI 入口（建库 → 规则启停 → 挂路由）
+    core/
+      config.py        Settings（环境变量，frozen dataclass + lru_cache）
+      db.py            sqlite3 封装：tasks/findings/audit_log/rules/user_prefs 五张表 + 写锁 + WAL
+    parsers/           输入分段：text/json/csv/sql/docx/pdf + registry 统一入口（PDF 依赖可选 pdfplumber）
+    webui/
+      index.html       自带单页界面：上传/粘贴 → 左原文高亮 / 右脱敏副本（无需前端工具链）
+    identify/
+      rules.py         L1 规则表（含校验算法、可启停）
+      scoring.py       评分公式与阈值
+      masking.py       四级脱敏模板
+      types.py         Level/EntityType/Hit/Result 等基础类型
+      l2.py            BERT 语义识别客户端（HTTP 契约 + 降级）
+      l3.py            L3 客户端：调 `l3_service`（http）或直连 Ollama（ollama）
+      operators.py     差分隐私 / l-多样性 / 泛化算子
+      pipeline.py      编排：解析 → L1 → (L2) → (L3) → 分级 → 脱敏 → 证据打包
+    tasks/
+      service.py       后台任务执行、findings 落库、逐条写审计
+      export.py        jsonl/json/csv/sql 导出
+    audit/
+      chain.py         HMAC 哈希链：追加、查询、校验
+    api/
+      deps.py          鉴权、操作人、流水线单例
+      schemas.py       请求/响应模型
+      routes_*.py      health/detect/tasks/findings/stats/rules/audit/dynamic/traffic/preferences
+    traffic/
+      pcap.py          pcap/pcapng 解析、write_pcap
+      frames.py        以太网/IP/TCP/UDP → Frame（载荷定位）
+      streams.py       会话聚合（TCP 重组）+ HTTP 正文拆分 + 内容类型识别
+      importer.py      抓包 → Document（复用解析/识别/任务链路）
+      live.py          实时旁路：增量跟随 pcap/pcapng 文件 + 窗口落库
+  l2_service/          L2 语义推理服务（mock / onnx 后端 + /v1/classify）
+  l2_training/         自举数据集、弱标注、微调脚本
+l3_training/         L3 指令微调：金标→指令样本、LoRA 训练、权重合并
+  l3_service/          L3 推理服务（mock / hf / instruct 后端 + /v1/judge”）
+  samples/             自带示例抓包生成脚本与 demo-traffic.pcap
+  eval/                评测集（351 条主集 + 200 条 NER 压力集）与评测说明
+  tests/               443 个用例：识别、解析（含 Word/PDF/图片 OCR）、管线、审计、API、界面、动态脱敏、场景模式、导出策略、L2/L3 服务、训练侧、评测（数据集需本地生成）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本
+  pyproject.toml
+  requirements.txt     运行依赖（固定版本）
+  requirements-ml.txt  可选：L2/L3/NER/训练与导出
+  requirements-dev.txt 开发测试依赖
+  .env.example         环境变量模板（复制成 .env 后用）
+  scripts/             一键启动/停止（start_local.ps1/.sh/.cmd、stop_local.*）
+web/                   正式前端（Vue3 + Element Plus + ECharts，Vite 构建，产物挂 /app）
+  src/views/           DetectView / TasksView / StatsView / RulesView / DynamicView / TrafficView
+  src/api.js           接口封装（同源 /api/v1，开发态走 vite proxy 到 8090）
+  src/highlight.js     命中区间高亮 + 脱敏副本渲染
+```
+
+### 8.1 前端主题（浅色 / 深色）
+
+- 主题状态在 `web/src/theme.js`：`initTheme()` 首次按「本地选择 → 系统外观」决定，`toggleTheme()` 顶栏开关切换并写 localStorage；
+- 颜色统一收敛到 `web/src/style.css` 的 CSS 变量（`html.dark` 覆盖一套值），组件里不写死颜色；ECharts 通过 `cssVar()` 读变量并在主题变化时重建图表；
+- 演示/截图可用 `http://127.0.0.1:8090/app/?theme=dark#stats` 临时指定主题（只对本次打开生效，不写本地存储）。
+- 多用户/跟随后端：偏好落在服务端 `user_prefs` 表，按 `X-Operator-Id`（默认 `local`）区分；顶栏「用户」下拉可切换操作人，切换后自动拉取该用户的主题；
+- 服务端默认主题用 `FLOWMASK_DEFAULT_THEME=light|dark|system` 配置；前端 localStorage 仅作首屏缓存与离线兜底。
+
+## 10. 设计要点（答辩口径）
+
+1. **原文不落库**：库里只存 `input_hash`（原文 SHA-256）、脱敏副本与哈希链字段；检索比对靠哈希，泄露风险最低。
+2. **分级识别按成本升级**：L1 微秒~毫秒级全量跑；只有 L1 命中且分数落在 0.25~0.85 灰区的样本才送 L3 复核；L3 只在 `Unsafe` 时升级，`Controversial/Safe` 只记理由，避免小模型把低危抬成中危。L2/L3 均可在配置里关掉，关掉即「纯规则模式」，链路不阻塞。
+3. **失败即降级**：L2/L3 超时或不可用 → 保留 L1 结论并置 `degraded=true`，不让模型成为单点故障。
+4. **可复算可审计**：每条 finding 带 `rule_ids`、`confidence_vector`、`model_chain`、`reasons`；审计日志与 finding 一一对应，`prev_hash` 串成链，任何字段改动都会在 `/audit/verify` 暴露。
+5. **模块化便于扩展**：解析器、识别器、算子、导出格式都是小函数/协议 + 注册表，新增格式或模型不需改主流程。
+
+## 11. 性能基准（本机实测）
+
+一次真实运行的样本，报告在 [`docs/性能报告.md`](../docs/性能报告.md)（由下面的命令直接生成，不手工填数）：
+
+```powershell
+python -m bench --skip-l2                        # 只测 L1 + 进程内 /detect
+python -m bench --l3-endpoint http://127.0.0.1:8092/v1/judge --markdown-out ../docs/性能报告.md
+```
+
+| 链路 | 单条均值 | P95 | 吞吐 | 口径 |
+| --- | ---: | ---: | ---: | --- |
+| L1 规则识别 + 评分分级 | **0.022 ms** | 0.023 ms | ≈4.4 万条/秒 | 纯 Go 等价物在 Python 侧，无网络/模型 |
+| 端到端 `POST /api/v1/detect` | **2.18 ms** | 2.42 ms | ≈459 请求/秒 | 进程内 HTTP（`TestClient`，不含浏览器开销） |
+| L2 ONNX int8（batch=1 → 32） | 7.38 → **4.09 ms**/条 | 4.19 ms | ≈244 条/秒 | CPU 推理；批越大单条越便宜 |
+| L3 指令裁判（Qwen2.5-1.5B） | **1.16 s** | 1.26 s | 0.86 条/秒 | RTX 5060 Laptop 8GB / CUDA，回环 HTTP |
+
+测试机：AMD Ryzen 9 8940HX（32 线程）、31 GB 内存、Windows 11、Python 3.12.10，2026-10-20 实测。
+诚实边界：L3 只复核 L1 灰区样本（默认关闭），全量走 L3 会因 1.16 s/条成为吞吐瓶颈 —— 这正是「三级协同、按需升级」的设计理由。
+
+## 12. 部署与一键启动
+
+见「2.1 一键启动」；下面只补充部署相关的约定。
+
+### 12.1 依赖清单（三个文件，按需装）
+
+| 文件 | 内容 | 什么时候装 |
+| --- | --- | --- |
+| `requirements.txt` | fastapi / uvicorn / pydantic / python-multipart / pdfplumber（均固定版本） | 必装：最小闭环（L1 规则 + 解析 + 任务/审计/API + 前端静态托管） |
+| `requirements-ml.txt` | onnxruntime / torch / transformers / onnx / onnxscript / modelscope | 需要 L2 真模型、L3 真模型、NER 或重新训练/导出时 |
+| `requirements-dev.txt` | `-r requirements.txt` + pytest / httpx | 跑测试、二次开发时 |
+
+模型权重**不随仓库分发**（`server/models/`、`server/l2_models/` 都在 .gitignore 里），用
+`python scripts/download_models.py --list` 看清单、`--only l3 ner` 按需下载（见 11.5 节）；
+不下载也能跑，L2/L3/NER 关闭时链路自动降级为 L1-only 并标 `degraded`。
+
+### 12.2 环境变量与 `.env`
+
+```powershell
+Copy-Item .env.example .env     # 然后按需改；启动脚本会自动加载
+```
+
+全部变量见 `.env.example`（含默认值与注释）。演示最常改的三个开关：`FLOWMASK_ENABLE_L2`、
+`FLOWMASK_ENABLE_L3`、`FLOWMASK_ENABLE_NER`；`.env` 里留空的项会回落默认值（有测试覆盖）。
+
+### 12.3 启动脚本参数（`scripts/start_local.ps1` / `.sh`）
+
+| 参数（PowerShell） | 参数（bash） | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `-Port` | `--port` | 8090 | 主服务端口 |
+| `-BindHost` | `--host` | 127.0.0.1 | 监听地址（对外提供服务时改 0.0.0.0 并设置 `FLOWMASK_API_TOKEN`） |
+| `-WithL2` | `--with-l2` | 关 | 起 `l2_service`（需 `l2_models/bert-sens-onnx`） |
+| `-WithL3` | `--with-l3` | 关 | 起 `l3_service`（需 `models/qwen2.5-1.5b-instruct`） |
+| `-L3Device` | `--l3-device` | cpu | L3 推理设备：cpu / cuda |
+| `-EnableNer` | `--ner` | 关 | 起主服务时启用 NER（需 `models/bert4ner`） |
+| `-NoBrowser` | `--no-browser` | 打开浏览器 | 不自动打开浏览器（服务器/CI 用） |
+
+产物位置：`server/data/run/<name>.pid`、`<name>.log`、`<name>.err.log`；
+`stop_local` 按 pid 文件停止并清理记录。
+
+### 12.4 部署注意（答辩口径）
+
+- **默认只监听回环**，模型与数据都在本机，满足「数据不出机」；对外暴露必须改 `FLOWMASK_API_TOKEN`
+  与 `FLOWMASK_AUDIT_SECRET`（审计链密钥不要用示例值）。
+- **Windows 执行策略**：直接 `\scripts\start_local.ps1` 可能被拦（`AuthorizationManager 检查失败`），
+  用 `.cmd` 包装或 `powershell -ExecutionPolicy Bypass -File .\scripts\start_local.ps1`。
+- **无模型降级路径**：不装 `requirements-ml.txt`、没有权重时，主服务照常可用，
+  只是 L2/L3/NER 不参与（结果里 `degraded=true`）。
+- **Tauri 桌面打包未做**（需 Rust 工具链）；给评委的 Windows 单文件 exe 见 11.6，双击即用。
+
+### 12.5 按需下载模型权重（`scripts/download_models.py`）
+
+权重不进仓库、也不打进 exe，用脚本按需拉取（本机 huggingface.co 不可直连，脚本默认走 ModelScope，
+NER 权重走 hf-mirror）：
+
+```powershell
+cd server
+python scripts/download_models.py --list          # 清单：名字/大小/落地目录/用途，已下载标 [ok]
+python scripts/download_models.py --only l3 ner   # 常用组合：L3 指令裁判 + L1.5 NER（约 3.3 GB）
+python scripts/download_models.py --all           # 全部 4 个目标（约 6.4 GB，含 L2 训练基座与护栏备选）
+python scripts/download_models.py --only l3 --dry-run   # 只看会做什么，不真下
+python scripts/download_models.py --all --dest D:\FlowMask\models   # 自定义落地目录
+```
+
+| 目标 | 大小 | 落地目录 | 用途 |
+| --- | ---: | --- | --- |
+| `l3` | 2955 MB | `models/qwen2.5-1.5b-instruct` | L3 解释与分级复核（`FLOWMASK_ENABLE_L3=1`） |
+| `ner` | 388 MB | `models/bert4ner` | 自由文本人名/地址（请求级 `enable_ner`） |
+| `l2-base` | 1632 MB | `models/bert-base-chinese` | 重训 L2 用；线上推理只需已导出的 ONNX |
+| `l3-guard` | 1449 MB | `models/qwen3guard-gen-0.6b` | 护栏口径的 L3 备选后端 |
+
+脚本行为：目标已完整（有 `config.json` + ≥1 MB 权重）就**跳过**，`--force` 可强制重下；
+依赖缺失时给出 `pip install` 提示并以退出码 2 结束，不会留下半个目录当“已下载”。
+L2 的 `l2_models/bert-sens-onnx` 是自训练产物、无法下载，需按 §3 重训导出或直接拷贝。
+
+### 12.6 打包 Windows 单文件 exe（双击即用）
+
+前端已构建的前提下，一条命令得到 `server/dist_exe/FlowMask.exe`（约 50 MB）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
+# 已构建过前端可加 -SkipFrontend 跳过 npm run build
+```
+
+双击 exe 之后：
+
+- 自动挑端口（8765 起，被占用顺延），起服务并用 **Edge/Chrome 的 app 模式**开一个无地址栏窗口（没有就回落默认浏览器）；
+- 数据写 `%LOCALAPPDATA%\FlowMask\data`（不污染安装/解压目录），日志 `%LOCALAPPDATA%\FlowMask\logs\desktop.log`；
+  若该目录被安全软件/组策略拒绝访问（WinError 5），自动回落为 **便携模式**：数据与日志放 exe 同级 `data/`、`logs/`；
+- 常用参数：`--port`、`--data-dir`、`--enable-l2`、`--enable-l3`、`--enable-ner`、`--no-browser`（详见 `FlowMask.exe --help`）；
+  双击没反应时先跑 `FlowMask.exe --self-check`，会在 exe 同级生成 `FlowMask-selfcheck.txt`（路径、可写性一目了然）。
+
+模型权重**不打进 exe**（这是体积能压到 50 MB 的原因）：把 `l2_models/`、`models/` 放到 **exe 同级目录**即可被自动识别；
+没有权重也能启动，链路自动降级为 L1-only（`degraded=true`）。
+
+在桌面放双击入口（「启动」和「停止」两个快捷方式）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\create_shortcut.ps1            # 桌面「FlowMask」
+powershell -ExecutionPolicy Bypass -File scripts\create_shortcut.ps1 -Mode stop  # 桌面「FlowMask 停止」
+# 自定义名字/路径：-ExePath D:\tools\FlowMask.exe -Name "FlowMask 演示"
+```
+
+两个快捷方式都通过 `cmd.exe` 调用 `scripts\start_flowmask.cmd` / `scripts\stop_flowmask.cmd` 中转：
+启动脚本负责把工作目录切到 exe 目录（onefile 解包目录 `.flowmask-tmp` 是相对工作目录的，切错会闪退）
+再用 `start` 脱离控制台，所以黑框一闪即关；停止脚本内部是 `FlowMask.exe --stop`。
+这样每条链路都能在命令行里原样复现，排查时不用猜「双击到底执行了什么」。
+也可以不走快捷方式，直接双击 `dist_exe\FlowMask.exe`（它自己会挑端口、开窗口）。
+
+停止有两条路，都不需要去找进程管理器：
+
+- **关窗口即停**：用 app 窗口模式打开时，关掉那个窗口服务就退出（`--keep-running` 可改成保留后台）；
+  浏览器把窗口交给已有实例、跟踪不到的情况会提示「请用停止快捷方式退出」；
+- **停止快捷方式**：`FlowMask.exe --stop`（后台实例的 pid 记录在 `run/desktop.pid`，也按进程名兜底），
+  结果写到 `run/last-stop.txt`，双击后会短暂显示一句「已停止 / 没有运行中的实例」。
+
+> **为什么解包目录固定在 exe 旁边**：onefile 启动时要先把自身解压到一个临时目录，默认用 `%TEMP%`。
+> 有的机器 `%TEMP%` 被安全软件/组策略限制不可写，会报 `Could not create temporary directory` 直接闪退；
+> 因此 `flowmask.spec` 把 `runtime_tmpdir` 固定为**相对路径** `.flowmask-tmp`（相对于工作目录），
+> 快捷方式把起始位置设成 exe 目录后，解包就落在 `dist_exe\.flowmask-tmp\`，稳定可写。
+> 如果手动用命令行启动，请在 exe 所在目录下执行（或把 `%TEMP%` 指到一个可写目录）。
+
+已知边界：exe 只跑**主服务**；L2/L3/NER 的 torch/onnxruntime 推理仍以 Python 进程单独启动（`python -m l2_service`），
+以免把 CUDA/驱动版本耦合进 exe。打包用 PyInstaller（`flowmask.spec`），**不需要** Rust/Node 运行时。
+
+### 12.7 一键演示（答辩 / 评审现场）
+
+`server/scripts/demo.ps1`（Windows）与 `demo.sh`（Linux/macOS）只调用 HTTP 接口、不依赖 Python 依赖，
+按「健康检查 → 即时检测 → 任务 + 审计 → pcap 流量 → 批量检测 → 动态脱敏 → 隐私增强导出 → 审计校验 → 看板」
+的顺序跑一遍，逐项打印 `[OK]/[FAIL]`，末尾给出退出码（0 = 全通过）。
+
+```powershell
+# 先起服务（或双击桌面 FlowMask.exe），再跑演示
+cd server
+powershell -ExecutionPolicy Bypass -File scripts\demo.ps1            # 默认 http://127.0.0.1:8090
+scripts\demo.cmd                                                     # 等价包装（cmd 里也能直接跑）
+powershell -ExecutionPolicy Bypass -File scripts\demo.ps1 -BaseUrl http://127.0.0.1:18099 -NoBrowser
+.\scripts\demo.sh http://127.0.0.1:8090                              # Linux/macOS
+```
+
+常用参数：`-BaseUrl`、`-NoBrowser`、`-SkipTraffic`（没有 `samples/demo-traffic.pcap` 时跳过流量步骤）。
+脚本会用 `curl.exe` 传 pcap 与批量文件，临时文件写在系统临时目录并在结束时自动清理。
+
+**换机验证口径**：演示脚本不假设库里有旧数据，用**全新 `FLOWMASK_DATA_DIR` + 空库**跑通全部 8 步
+（本机实测：3 个会话 pcap 导入、批量 3 文件、审计链 11 条 `ok=true`、隐私导出 `total=1` 且
+`l_diversity.ok=false`（单条任务必然不足 `l`，符合定义））——即「新机器上只装依赖 + 起服务」就能复现。
+
+## 13. 下一步
+
+- **L2 真权重**：已用 bert-base-chinese 微调并导出 ONNX int8（`l2_models/bert-sens-onnx`，单条 10–33 ms）；权重不入库，重训命令见 `l2_training/README.md`；
+- **LLM 敏感度调优**：已落地 LoRA 指令微调（`l3_training/`，裁判准确率 60.0% → 76.2%，见 4.1 节）；但管道里 L1+L2 已 99.7%，L3 默认仍只做解释/兜底——下一步是扩大本域标注（含自由文本），再决定是否让 L3 覆盖分级；
+- **NER 权重升级**：机制与前端开关已就绪（服务端开关 + 请求级 `enable_ner`），待更换更高质量中文 NER 权重/领域微调以提升结构化场景精度；
+- **网卡直采（可选）**：实时旁路已支持跟随 pcap 文件（dumpcap/Wireshark/自研采集器写）；若要服务端直接抓网卡，需引入 Npcap/libpcap（管理员权限）作为可选增强；
+- 交付侧：只保留开发与联调，答辩材料由他人负责。

@@ -1,0 +1,364 @@
+"""识别流水线测试：L1/L2/L3 协同、降级、脱敏级别覆盖。"""
+
+from __future__ import annotations
+
+from app.identify import DetectionPipeline, DetectOptions, EntityType, Level
+from app.identify.l2 import SemanticHit
+from app.identify.l3 import GuardVerdict
+from app.identify.pipeline import sha256_text
+from app.parsers import parse_json, parse_text
+
+ID_CARD = "11010519491231002X"
+PHONE = "13800138000"
+
+
+class FakeSemantic:
+    """假的 L2：固定返回"医疗信息"类别，用来验证类别合并与模型链路。"""
+
+    name = "fake-l2"
+
+    def available(self) -> bool:
+        return True
+
+    def predict(self, text: str) -> list[SemanticHit]:
+        return [SemanticHit(type=EntityType.MEDICAL, confidence=0.92)]
+
+
+class BrokenSemantic:
+    name = "broken-l2"
+
+    def available(self) -> bool:
+        return True
+
+    def predict(self, text: str) -> list[SemanticHit]:
+        raise TimeoutError("推理服务超时")
+
+
+class FakeGuard:
+    name = "fake-guard"
+
+    def available(self) -> bool:
+        return True
+
+    def judge(self, text: str) -> GuardVerdict | None:
+        return GuardVerdict(risk="Unsafe", reason="检测到疑似身份证号，需按高危处理", model="fake-qwen")
+
+
+class DownGuard:
+    name = "down-guard"
+
+    def available(self) -> bool:
+        return True
+
+    def judge(self, text: str) -> GuardVerdict | None:
+        return None  # 服务不可用
+
+
+def test_l1_only_json_document() -> None:
+    document = parse_json('{"name":"张三","id_card":"%s"}' % ID_CARD)
+    report = DetectionPipeline().analyze_document(document, DetectOptions())
+    assert report.segments == 2
+    # 字段名作为上下文：{"name":"张三"} 命中姓名字段规则，{"id_card":...} 命中身份证
+    findings = {finding.path: finding for finding in report.findings}
+    assert set(findings) == {"$.name", "$.id_card"}
+    id_finding = findings["$.id_card"]
+    assert id_finding.level == Level.HIGH and id_finding.model_chain == "l1"
+    assert id_finding.masked == "110105********002X"
+    assert ID_CARD not in id_finding.masked
+    # 脱敏只作用在值上：区间从 0 开始，不把字段名算进去
+    assert id_finding.spans[0]["start"] == 0
+    name_finding = findings["$.name"]
+    # L1 只加「需复核」标记，姓名仍按 L2 模板遮成星号，不把原文留在脱敏副本里
+    assert name_finding.level == Level.LOW and name_finding.masked == "[低危]**"
+    assert report.by_level["L3"] == 1 and report.by_level["L1"] == 1
+
+
+def test_medical_hit_masks_whole_sentence() -> None:
+    """症状与诊断在同一句时整句遮蔽，避免「反复头痛…」反推偏头痛。"""
+    text = "患者姓名：张三，主诉：反复头痛 3 个月，伴恶心呕吐，考虑偏头痛。复查血常规。"
+    finding = DetectionPipeline().analyze_text(text, DetectOptions())
+    assert finding is not None
+    assert "张三" not in finding.masked
+    assert "头痛" not in finding.masked
+    assert "恶心" not in finding.masked
+    assert "偏头痛" not in finding.masked
+    # 下一句没有被牵连
+    assert "复查血常规" in finding.masked
+    medical_span = next(span for span in finding.spans if span["type"] == "medical")
+    covered = text[medical_span["start"] : medical_span["end"]]
+    assert covered.startswith("患者姓名")
+    assert "偏头痛" in covered
+
+
+def test_medical_field_keeps_label_and_masks_value() -> None:
+    """医疗字段保留「主诉 / 初步诊断」标签，字段值用星号遮盖。"""
+    text = "主诉：反复头痛 3 个月；初步诊断：偏头痛。"
+    finding = DetectionPipeline().analyze_text(text, DetectOptions())
+    assert finding is not None
+    assert "主诉：" in finding.masked
+    assert "初步诊断：" in finding.masked
+    assert "头痛" not in finding.masked
+    assert "偏头痛" not in finding.masked
+
+
+def test_l2_merges_types_and_chain() -> None:
+    document = parse_text("邮箱 zhang.san@example.com")
+    report = DetectionPipeline(semantic=FakeSemantic()).analyze_document(
+        document, DetectOptions(enable_l2=True)
+    )
+    finding = report.findings[0]
+    assert finding.model_chain == "l1>l2"
+    assert "medical" in finding.types  # L2 补出来的类别
+    assert finding.score > 0.405
+
+
+def test_l2_exception_marks_degraded() -> None:
+    document = parse_text("邮箱 zhang.san@example.com")
+    report = DetectionPipeline(semantic=BrokenSemantic()).analyze_document(
+        document, DetectOptions(enable_l2=True)
+    )
+    assert report.degraded is True
+    assert report.findings[0].model_chain == "l1"
+
+
+def test_l3_unsafe_upgrade_capped_by_max_target(monkeypatch) -> None:
+    """Unsafe 升级同样受 FLOWMASK_L3_MAX_TARGET 约束：默认只抬到中危。
+
+    背景：1.5B 指令模型零样本对边界样本也会给 Unsafe（实测把「诊断: 2型糖尿病」判成
+    Unsafe/L3），不设上限会把金标 L2 抬成 L3、准确率从 98.7% 掉到 97.3%。
+    """
+    monkeypatch.delenv("FLOWMASK_L3_MAX_TARGET", raising=False)
+    document = parse_text("联系人：zhang.san@example.com")
+    finding = DetectionPipeline(guard=FakeGuard()).analyze_document(
+        document, DetectOptions(enable_l3=True)
+    ).findings[0]
+    assert finding.level == Level.MID  # 默认上限 L2
+    assert finding.model_chain == "l1>l3"
+    assert finding.reason and "身份证" in finding.reason
+
+    # 显式放开上限到 L3 才允许抬到高危
+    monkeypatch.setenv("FLOWMASK_L3_MAX_TARGET", "L3")
+    finding = DetectionPipeline(guard=FakeGuard()).analyze_document(
+        parse_text("联系人：zhang.san@example.com"), DetectOptions(enable_l3=True)
+    ).findings[0]
+    assert finding.level == Level.HIGH
+
+
+def test_l3_unavailable_degrades_without_blocking() -> None:
+    document = parse_text(f"联系电话 {PHONE}")
+    report = DetectionPipeline(guard=DownGuard()).analyze_document(document, DetectOptions(enable_l3=True))
+    assert report.degraded is True
+    assert report.findings[0].level == Level.MID  # 保留 L1 结论
+
+
+def test_mask_level_override_in_options() -> None:
+    document = parse_text(f"联系电话 {PHONE}")
+    report = DetectionPipeline().analyze_document(document, DetectOptions(mask_level=Level.HIGH))
+    assert "手机号" in report.findings[0].masked
+
+
+def test_min_level_filters_low_findings() -> None:
+    document = parse_text("邮箱 zhang.san@example.com")
+    report = DetectionPipeline().analyze_document(document, DetectOptions(min_level=Level.MID))
+    assert report.findings == []
+    assert report.by_level["L1"] == 1  # 统计仍然算到
+
+
+def test_safe_text_yields_no_finding() -> None:
+    assert DetectionPipeline().analyze_text("今天天气不错", DetectOptions()) is None
+
+
+def test_sha256_text_is_stable() -> None:
+    assert sha256_text("abc") == sha256_text("abc") and len(sha256_text("abc")) == 64
+
+class BenignSemantic:
+    """假的 L2：判"这是示例数据"，置信度可配。"""
+
+    name = "benign-l2"
+
+    def __init__(self, confidence: float) -> None:
+        self.confidence = confidence
+
+    def available(self) -> bool:
+        return True
+
+    def predict(self, text: str) -> list[SemanticHit]:
+        return [SemanticHit(type=None, confidence=self.confidence, benign=True)]
+
+
+def test_l2_benign_suppresses_phone_level() -> None:
+    """只有手机号时 L1 判 L2；L2 确认为示例数据后应压回 SAFE。"""
+    text = "示例号码 13800138000 仅用于联调测试"
+    l1 = DetectionPipeline().analyze_text(text, DetectOptions())
+    assert l1 is not None and l1.level == Level.MID
+
+    suppressed = DetectionPipeline(semantic=BenignSemantic(0.9)).analyze_text(
+        text, DetectOptions(enable_l2=True)
+    )
+    assert suppressed is not None
+    assert suppressed.level == Level.SAFE
+    assert suppressed.model_chain == "l1>l2"
+    assert any(item["type"] == "l2_benign" for item in suppressed.confidence_vector)
+
+
+def test_l2_benign_does_not_suppress_direct_with_low_confidence() -> None:
+    """证件号是直达高危：L2 置信度不够高时不许压制（宁误报勿漏报）。"""
+    text = "身份证 11010519491231002X"
+    finding = DetectionPipeline(semantic=BenignSemantic(0.7)).analyze_text(
+        text, DetectOptions(enable_l2=True)
+    )
+    assert finding is not None
+    assert finding.level == Level.HIGH
+
+
+def test_l2_benign_suppresses_direct_when_very_confident() -> None:
+    """L2 非常确信"这是示例"时，直达高危也允许压下去，并取消 direct 标记。"""
+    text = "示例：身份证 11010519491231002X 仅为演示数据"
+    finding = DetectionPipeline(semantic=BenignSemantic(0.95)).analyze_text(
+        text, DetectOptions(enable_l2=True)
+    )
+    assert finding is not None
+    assert finding.level.severity < Level.HIGH.severity
+    assert finding.direct is False
+
+
+def test_l2_context_uses_document_text() -> None:
+    """JSON 里"示例"线索在别的字段，L2 应拿到文档级上下文而不是只看单个值。"""
+
+    class ContextAware:
+        name = "ctx-l2"
+
+        def available(self) -> bool:
+            return True
+
+        def predict(self, text: str) -> list[SemanticHit]:
+            return [SemanticHit(type=None, confidence=0.95, benign=True)] if "示例" in text else []
+
+    document = parse_json('{"说明":"以下为示例数据","phone":"13800138000"}')
+    report = DetectionPipeline(semantic=ContextAware()).analyze_document(
+        document, DetectOptions(enable_l2=True)
+    )
+    assert all(finding.level == Level.SAFE for finding in report.findings)
+
+
+class ControversialGuard:
+    """返回 Controversial 的护栏：按新口径不应把低危抬成中危。"""
+
+    name = "controversial-guard"
+
+    def available(self) -> bool:
+        return True
+
+    def judge(self, text: str) -> GuardVerdict | None:
+        return GuardVerdict(risk="Controversial", reason="看起来像个人信息", model="fake-qwen")
+
+
+def test_l3_controversial_does_not_raise_level() -> None:
+    # 邮箱类样本 L1 判 L1，护栏说 Controversial 也不该升级（只记录证据与理由）
+    document = parse_text("联系人：zhang.san@example.com")
+    report = DetectionPipeline(guard=ControversialGuard()).analyze_document(
+        document, DetectOptions(enable_l3=True)
+    )
+    finding = report.findings[0]
+    assert finding.level.value == "L1"
+    assert "l3" in finding.model_chain
+    assert finding.reason == "看起来像个人信息"
+
+
+def test_benign_threshold_env_override(monkeypatch) -> None:
+    """阈值可用环境变量覆盖：调参/消融实验不必改代码。"""
+    text = "手机 13800138000"
+    finding = DetectionPipeline(semantic=BenignSemantic(0.8)).analyze_text(
+        text, DetectOptions(enable_l2=True)
+    )
+    assert finding is not None and finding.level == Level.SAFE  # 0.8 > 默认 0.65
+    monkeypatch.setenv("FLOWMASK_L2_BENIGN_MIN", "0.9")
+    finding = DetectionPipeline(semantic=BenignSemantic(0.8)).analyze_text(
+        text, DetectOptions(enable_l2=True)
+    )
+    assert finding is not None and finding.level.value == "L2"  # 阈值抬高后不再压制
+
+
+class PiiCategoryGuard:
+    """点出 PII 类别、但不判 Unsafe 的复核模型（模拟护栏模型的真实行为）。"""
+
+    name = "pii-category-guard"
+
+    def available(self) -> bool:
+        return True
+
+    def judge(self, text: str) -> GuardVerdict | None:
+        return GuardVerdict(
+            risk="Controversial",
+            reason="含个人信息",
+            model="fake-qwen",
+            categories=("PII",),
+        )
+
+
+class LevelHintGuard:
+    """指令模型：直接给分级建议（level_hint），risk 只做兜底。"""
+
+    def __init__(self, hint: str) -> None:
+        self.hint = hint
+        self.name = "level-hint-guard"
+
+    def available(self) -> bool:
+        return True
+
+    def judge(self, text: str) -> GuardVerdict | None:
+        return GuardVerdict(risk="Safe", reason="按分级细则判定", model="instruct", level_hint=self.hint)
+
+
+def test_l3_category_aware_raises_low_to_mid(monkeypatch) -> None:
+    """类别感知默认关闭（实测会把 name/email/address 类低危样本全抬成中危、准确率 98.7%→85.3%）。"""
+    monkeypatch.delenv("FLOWMASK_L3_CATEGORY_RAISE", raising=False)
+    finding = DetectionPipeline(guard=PiiCategoryGuard()).analyze_document(
+        parse_text("联系人：zhang.san@example.com"), DetectOptions(enable_l3=True)
+    ).findings[0]
+    assert finding.level == Level.LOW  # 默认只解释、不改级别
+
+    # 显式开启后才按类别抬到中危
+    monkeypatch.setenv("FLOWMASK_L3_CATEGORY_RAISE", "1")
+    finding = DetectionPipeline(guard=PiiCategoryGuard()).analyze_document(
+        parse_text("联系人：zhang.san@example.com"), DetectOptions(enable_l3=True)
+    ).findings[0]
+    assert finding.level == Level.MID
+    evidence = [item for item in finding.confidence_vector if item.get("type") == "l3_guard"]
+    assert evidence and evidence[0]["raised"] is True
+    assert evidence[0]["categories"] == ["PII"]
+
+
+def test_l3_level_hint_is_trusted_for_upgrade(monkeypatch) -> None:
+    """指令模型给分级建议时按建议升级（只升不降），且可被 env 关闭。"""
+    monkeypatch.delenv("FLOWMASK_L3_TRUST_LEVEL_HINT", raising=False)
+    monkeypatch.delenv("FLOWMASK_L3_MAX_TARGET", raising=False)
+    document = parse_text("联系人：zhang.san@example.com")
+    finding = DetectionPipeline(guard=LevelHintGuard("L2")).analyze_document(
+        document, DetectOptions(enable_l3=True)
+    ).findings[0]
+    assert finding.level == Level.MID
+
+    monkeypatch.setenv("FLOWMASK_L3_TRUST_LEVEL_HINT", "0")
+    finding = DetectionPipeline(guard=LevelHintGuard("L2")).analyze_document(
+        parse_text("联系人：zhang.san@example.com"), DetectOptions(enable_l3=True)
+    ).findings[0]
+    assert finding.level == Level.LOW
+
+
+def test_l3_level_hint_capped_by_max_target(monkeypatch) -> None:
+    """非 Unsafe 情形默认最多抬到 L2：防止大模型把低危一路抬成高危。"""
+    monkeypatch.delenv("FLOWMASK_L3_TRUST_LEVEL_HINT", raising=False)
+    monkeypatch.delenv("FLOWMASK_L3_MAX_TARGET", raising=False)
+    document = parse_text("联系人：zhang.san@example.com")
+    finding = DetectionPipeline(guard=LevelHintGuard("L3")).analyze_document(
+        document, DetectOptions(enable_l3=True)
+    ).findings[0]
+    assert finding.level == Level.MID
+
+    monkeypatch.setenv("FLOWMASK_L3_MAX_TARGET", "L3")
+    finding = DetectionPipeline(guard=LevelHintGuard("L3")).analyze_document(
+        parse_text("联系人：zhang.san@example.com"), DetectOptions(enable_l3=True)
+    ).findings[0]
+    assert finding.level == Level.HIGH
+

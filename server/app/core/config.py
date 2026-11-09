@@ -1,0 +1,144 @@
+"""运行配置。
+
+所有配置项都可以用 ``FLOWMASK_`` 前缀的环境变量覆盖，默认值面向本机演示：
+数据写在 ``server/data``，不依赖任何外部服务；L2/L3 默认关闭（模型未接入时
+识别链会自动降级为 L1-only，并在结果里标记 ``degraded``）。
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+from .paths import default_data_dir
+
+# 源码运行 = server/；打成 exe 后 = 用户目录（%LOCALAPPDATA%\\FlowMask）
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
+DEFAULT_DATA_DIR = default_data_dir()
+
+
+def _env_str(name: str, default: str) -> str:
+    value = os.environ.get(f"FLOWMASK_{name}")
+    return default if value is None or value == "" else value
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(f"FLOWMASK_{name}")
+    if value is None or value == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(f"FLOWMASK_{name}")
+    if value is None or value == "":
+        return default
+    return float(value)
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(f"FLOWMASK_{name}")
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
+THEMES = ("light", "dark", "system")
+
+
+def _parse_theme(value: str) -> str:
+    """主题值只有三种；配错了退回 system，避免一个笔误让前端起不来。"""
+    normalized = (value or "").strip().lower()
+    return normalized if normalized in THEMES else "system"
+
+
+ASSISTANT_MODES = ("off", "ollama")
+
+
+def _parse_assistant_mode(value: str) -> str:
+    """助手只支持规则引擎与本机 Ollama；历史 external 配置一律降级为 off。"""
+    normalized = (value or "").strip().lower()
+    return normalized if normalized in ASSISTANT_MODES else "off"
+
+
+@dataclass(frozen=True)
+class Settings:
+    """一份不可变的运行配置快照。"""
+
+    data_dir: Path
+    db_path: Path
+    # 留空表示不鉴权（本机演示默认）；部署时设置 Bearer Token
+    api_token: str
+    # 审计哈希链签名密钥（HMAC-SHA256）；生产环境应从密钥管理注入
+    audit_secret: str
+    enable_l2: bool
+    enable_l3: bool
+    l2_endpoint: str
+    l3_endpoint: str
+    l3_model: str
+    # L3 调用方式：http（本仓 l3_service）/ ollama（/api/generate）
+    l3_mode: str
+    l2_timeout_s: float
+    l3_timeout_s: float
+    max_upload_mb: int
+    cors_origins: tuple[str, ...]
+    # L1.5 实体识别（人名/地址），默认关闭：开启会额外拉起一个 NER 模型
+    enable_ner: bool
+    ner_model_dir: str
+    ner_device: str
+    # 前端默认主题：light / dark / system（system 表示跟随操作系统外观）。
+    # 用户在界面里手动选过之后，个人偏好存在库里并优先于这个默认值。
+    default_theme: str
+    # AI 助手：off（规则引擎，默认）/ ollama（本机回环，数据不出机）
+    assistant_mode: str
+    assistant_endpoint: str
+    assistant_model: str
+    assistant_timeout_s: float
+    # OCR：rapidocr / ollama-vl；默认关闭，按需打开
+    ocr_engine: str
+    ocr_enabled: bool
+
+    @classmethod
+    def load(cls) -> "Settings":
+        data_dir = Path(_env_str("DATA_DIR", str(DEFAULT_DATA_DIR))).resolve()
+        db_path = Path(_env_str("DB_PATH", str(data_dir / "flowmask.db"))).resolve()
+        origins = _env_str(
+            "CORS_ORIGINS",
+            "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8080",
+        )
+        return cls(
+            data_dir=data_dir,
+            db_path=db_path,
+            api_token=_env_str("API_TOKEN", ""),
+            audit_secret=_env_str("AUDIT_SECRET", "flowmask-demo-secret"),
+            enable_l2=_env_bool("ENABLE_L2", False),
+            enable_l3=_env_bool("ENABLE_L3", False),
+            l2_endpoint=_env_str("L2_ENDPOINT", "http://127.0.0.1:8091/v1/classify"),
+            l3_endpoint=_env_str("L3_ENDPOINT", "http://127.0.0.1:8092/v1/judge"),
+            l3_model=_env_str("L3_MODEL", "qwen3guard-gen-0.6b"),
+            l3_mode=_env_str("L3_MODE", "http").strip().lower(),
+            l2_timeout_s=_env_float("L2_TIMEOUT_S", 0.5),
+            l3_timeout_s=_env_float("L3_TIMEOUT_S", 5.0),
+            max_upload_mb=_env_int("MAX_UPLOAD_MB", 20),
+            cors_origins=tuple(x.strip() for x in origins.split(",") if x.strip()),
+            enable_ner=_env_bool("ENABLE_NER", False),
+            ner_model_dir=_env_str("NER_MODEL_DIR", ""),
+            ner_device=_env_str("NER_DEVICE", "cpu").strip().lower(),
+            default_theme=_parse_theme(_env_str("DEFAULT_THEME", "system")),
+            assistant_mode=_parse_assistant_mode(_env_str("ASSISTANT_MODE", "off")),
+            assistant_endpoint=_env_str(
+                "ASSISTANT_ENDPOINT", "http://127.0.0.1:11434/v1/chat/completions"
+            ),
+            assistant_model=_env_str("ASSISTANT_MODEL", "qwen2.5:1.5b"),
+            assistant_timeout_s=_env_float("ASSISTANT_TIMEOUT_S", 3.0),
+            ocr_engine=_env_str("OCR_ENGINE", "rapidocr").strip().lower(),
+            ocr_enabled=_env_bool("OCR_ENABLED", False),
+        )
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """进程内单例（测试里用 ``get_settings.cache_clear()`` 重置）。"""
+    return Settings.load()

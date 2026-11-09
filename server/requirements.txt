@@ -1,0 +1,22 @@
+# FlowMask 服务端运行依赖（Python 3.12，版本为本机实测通过的固定版本）
+#
+#   python -m pip install -r requirements.txt
+#
+# 说明：
+# - 这是「最小闭环」依赖：只跑 L1 规则 + 解析 + 任务/审计/API + 内置页面/正式前端静态托管；
+# - L2 推理 / L3 大模型 / NER 需要额外依赖，见 requirements-ml.txt（可选）；
+# - 训练与 ONNX 导出还需要 torch/transformers，同样在 requirements-ml.txt 里。
+fastapi==0.148.0
+uvicorn==0.54.0
+pydantic==2.14.1
+python-multipart==0.0.32
+# Word/PDF 解析用到（PDF 走 pdfplumber；docx 是自研 zip+XML，不依赖 python-docx）
+pdfplumber==0.11.10
+# L1 敏感词表（三级知识库 YAML + Aho-Corasick）
+# pyyaml 必装；pyahocorasick 可选：装了走 C 扩展（词表大时更快），没装会自动退回同语义的纯 Python 实现
+pyyaml==6.0.3
+pyahocorasick==2.3.1
+# 导出侧 encrypt 策略：AES-GCM 对称加密（Fernet 封装）
+cryptography==46.0.3
+# 启动时加载 server/.env（OCR/AI 助手等可选配置）
+python-dotenv==1.1.0
