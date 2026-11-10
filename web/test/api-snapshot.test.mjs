@@ -35,3 +35,21 @@ test('snapshot export does not resubmit input or detection options', async () =>
   assert.equal(sent.url, '/api/v1/detect/export');
   assert.deepEqual(sent.body, { result_id: 'snapshot', policy_version: 'v1', strategy: 'block', fmt: 'txt' });
 });
+
+test('uploads distinguish explicit model switches from omitted defaults', async () => {
+  let sent;
+  globalThis.window = { localStorage: { getItem: () => null } };
+  globalThis.fetch = async (url) => {
+    sent = new URL(url, 'http://localhost').searchParams;
+    return new Response('{}', { status: 200 });
+  };
+  const file = new File(['sample'], 'sample.txt');
+  for (const upload of [api.detectFile, api.importTraffic, (input, opts) => api.batchTasks([input], opts)]) {
+    await upload(file, { enableL2: false, enableL3: true });
+    assert.equal(sent.get('enable_l2'), 'false');
+    assert.equal(sent.get('enable_l3'), 'true');
+    await upload(file);
+    assert.equal(sent.has('enable_l2'), false);
+    assert.equal(sent.has('enable_l3'), false);
+  }
+});

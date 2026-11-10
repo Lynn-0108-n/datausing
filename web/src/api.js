@@ -130,8 +130,8 @@ export const api = {
     const fd = new FormData();
     fd.append("file", file);
     const qs = new URLSearchParams();
-    if (opts.enableL2) qs.set("enable_l2", "true");
-    if (opts.enableL3) qs.set("enable_l3", "true");
+    if (typeof opts.enableL2 === "boolean") qs.set("enable_l2", String(opts.enableL2));
+    if (typeof opts.enableL3 === "boolean") qs.set("enable_l3", String(opts.enableL3));
     if (opts.enableNer !== undefined && opts.enableNer !== null) {
       qs.set("enable_ner", opts.enableNer ? "true" : "false");
     }
@@ -190,8 +190,8 @@ export const api = {
     const fd = new FormData();
     fd.append("pcap", file);
     const qs = new URLSearchParams();
-    if (opts.enableL2) qs.set("enable_l2", "true");
-    if (opts.enableL3) qs.set("enable_l3", "true");
+    if (typeof opts.enableL2 === "boolean") qs.set("enable_l2", String(opts.enableL2));
+    if (typeof opts.enableL3 === "boolean") qs.set("enable_l3", String(opts.enableL3));
     if (opts.maskLevel) qs.set("mask_level", opts.maskLevel);
     if (opts.minLevel) qs.set("min_level", opts.minLevel);
     return request(`/traffic/import?${qs.toString()}`, { method: "POST", body: fd });
@@ -208,8 +208,8 @@ export const api = {
     const fd = new FormData();
     for (const file of files) fd.append("files", file);
     const qs = new URLSearchParams();
-    if (opts.enableL2) qs.set("enable_l2", "true");
-    if (opts.enableL3) qs.set("enable_l3", "true");
+    if (typeof opts.enableL2 === "boolean") qs.set("enable_l2", String(opts.enableL2));
+    if (typeof opts.enableL3 === "boolean") qs.set("enable_l3", String(opts.enableL3));
     if (opts.enableNer) qs.set("enable_ner", "true");
     if (opts.maskLevel && opts.maskLevel !== "auto") qs.set("mask_level", opts.maskLevel);
     if (opts.minLevel) qs.set("min_level", opts.minLevel);
@@ -242,8 +242,8 @@ export const api = {
     fd.append("file", file);
     fd.append("strategy", opts.strategy || "partial");
     fd.append("fmt", opts.fmt || "auto");
-    fd.append("enable_l2", opts.enableL2 ? "true" : "false");
-    fd.append("enable_l3", opts.enableL3 ? "true" : "false");
+    if (typeof opts.enableL2 === "boolean") fd.append("enable_l2", String(opts.enableL2));
+    if (typeof opts.enableL3 === "boolean") fd.append("enable_l3", String(opts.enableL3));
     fd.append("enable_ner", opts.enableNer ? "true" : "false");
     if (opts.enableKeywords !== undefined && opts.enableKeywords !== null) {
       fd.append("enable_keywords", opts.enableKeywords ? "true" : "false");

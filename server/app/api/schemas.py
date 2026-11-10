@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -19,8 +19,8 @@ class DetectRequest(BaseModel):
 
     text: str = Field(min_length=1, max_length=200_000, description="待检测文本")
     content_type: str = Field(default="text", description="text / json / csv / sql（自动探测）")
-    enable_l2: bool = Field(default=False, description="是否启用 L2 语义识别（需推理服务在线）")
-    enable_l3: bool = Field(default=False, description="是否启用 L3 本地大模型复核（需 Ollama 在线）")
+    enable_l2: bool | None = Field(default=None, description="是否启用 L2 语义识别（需推理服务在线）")
+    enable_l3: bool | None = Field(default=None, description="是否启用 L3 本地大模型复核（需本地推理服务在线）")
     # None = 跟服务端默认（FLOWMASK_ENABLE_NER）；显式 true/false 按本次请求
     enable_ner: bool | None = Field(default=None, description="是否启用 L1.5 实体识别（人名/地址，适合自由文本）")
     enable_keywords: bool | None = Field(default=None, description="是否启用 L1 敏感词表（法规/行业/企业三级知识库）；None=跟随服务端默认（开）")
@@ -32,8 +32,8 @@ class TextTaskIn(BaseModel):
     """提交文本任务请求（会落库，因此有长度上限且不允许 mask_level=SAFE）。"""
 
     text: str = Field(min_length=1, max_length=200_000, description="待检测文本（最长 20 万字符）")
-    enable_l2: bool = Field(default=False, description="是否启用 L2 语义识别（需推理服务在线）")
-    enable_l3: bool = Field(default=False, description="是否启用 L3 本地大模型复核（需 Ollama 在线）")
+    enable_l2: bool | None = Field(default=None, description="是否启用 L2 语义识别（需推理服务在线）")
+    enable_l3: bool | None = Field(default=None, description="是否启用 L3 本地大模型复核（需本地推理服务在线）")
     enable_ner: bool = Field(default=False, description="是否启用 L1.5 实体识别（人名/地址）")
     mask_level: str | None = Field(default=None, description="强制按该级别脱敏；任务落库不接受 SAFE")
     min_level: str = Field(default="SAFE", description="只返回 ≥ 该级别的结果（SAFE/L1/L2/L3）")
@@ -59,6 +59,7 @@ class SegmentOut(BaseModel):
     hits: int
     masked: str = Field(description="脱敏副本（不含原文敏感值）")
     model_chain: str = Field(description="实际使用的模型链：l1 / l1>l2 / l1>l2>l3")
+    engine_runs: dict[str, str] = Field(default_factory=dict)
     reason: str | None = None
     degraded: bool = False
     direct: bool = False
@@ -71,6 +72,8 @@ class DetectOut(BaseModel):
     ruleset_revision: str | None = None
     policy_version: str | None = None
     effective_options: dict[str, Any] = Field(default_factory=dict)
+    engine_runs: dict[str, dict[str, int]] = Field(default_factory=dict)
+    coverage: Literal["complete", "partial"] = "complete"
     content_type: str
     segments: int = Field(description="实际检测的片段数")
     findings: list[SegmentOut]
@@ -371,8 +374,8 @@ class TrafficIngestIn(BaseModel):
     source: str = Field(default="agent", max_length=128, description="采集来源标识（会写进任务 source）")
     content_type: str = Field(default="ingest", max_length=32)
     segments: list[IngestSegmentIn] = Field(min_length=1, max_length=200)
-    enable_l2: bool = Field(default=False)
-    enable_l3: bool = Field(default=False)
+    enable_l2: bool | None = Field(default=None)
+    enable_l3: bool | None = Field(default=None)
     enable_ner: bool | None = Field(default=None)
     mask_level: str | None = Field(default=None)
     min_level: str = Field(default="SAFE")
@@ -397,8 +400,8 @@ class LiveStartIn(BaseModel):
     )
     interval_ms: int = Field(default=500, ge=100, le=10_000, description="轮询间隔（毫秒）")
     window_s: float = Field(default=2.0, ge=0.2, le=60.0, description="聚合窗口：每窗口生成一个任务")
-    enable_l2: bool = False
-    enable_l3: bool = False
+    enable_l2: bool | None = None
+    enable_l3: bool | None = None
     # None 表示“跟服务端默认走”（FLOWMASK_ENABLE_NER）；显式 true/false 则按本次请求
     enable_ner: bool | None = None
     mask_level: str | None = None
@@ -538,8 +541,8 @@ class DetectExportRequest(BaseModel):
         default="auto",
         description="输出格式：auto（跟随 content_type）/ txt / json / csv / sql / docx / xlsx",
     )
-    enable_l2: bool = False
-    enable_l3: bool = False
+    enable_l2: bool | None = None
+    enable_l3: bool | None = None
     enable_ner: bool | None = None
     enable_keywords: bool | None = None
     min_level: str = Field(default="SAFE", description="只返回 ≥ 该级别的结果（不影响导出内容的完整脱敏）")

@@ -120,11 +120,6 @@ class Result:
     degraded: bool = False
     # L2/L3 的类别级证据（没有字符区间，不参与脱敏，只影响评分与解释）
     extra_evidence: list[dict[str, object]] = field(default_factory=list)
-    # L2 判定"示例/测试数据"时的分数压制系数（1.0 表示未压制）；
-    # 归一化/上下文前缀会导致重算分数，必须把系数带过去，否则压制被覆盖。
-    score_scale: float = 1.0
-    # L3 复核抬升后的级别下限：归一化重算分数时不能被算回去
-    level_floor: Level = Level.SAFE
 
     @property
     def type_keys(self) -> list[str]:

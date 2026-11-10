@@ -1,3 +1,28 @@
+# FlowMask L2 / L3 交接 · 2026-11-10
+
+## 当前状态
+
+- 本地分支 `codex/l2-l3` 基于 `ae800c2`。L2 / L3 请求开关、推理异常降级、执行状态与结构化字段的 L2 证据保留已实现。
+- Python 全套 727 通过、5 跳过，Node 测试 15 通过。Vite 构建 API 在仓库内临时目录构建成功。
+- 使用本机 ONNX int8 分类模型和 CUDA 上的 `qwen2.5-1.5b-sens` 实测合成手机号。两层默认关闭时，显式启用得到 `l1>l2>l3`，执行覆盖为 `complete`，脱敏副本不含原手机号。
+- 本地 `origin` 指向 `wukiQAQ/datausing`。GitHub 域名解析失败，未核实用户给出的 `lynn-0108-n/datausing` 与本地副本的关系及写权限。未推送、未创建 Issue 或 PR。
+
+## 已定决策
+
+不要重新讨论这些约定。省略 L2/L3 开关继承服务端默认值，显式布尔值覆盖默认值。风险等级与模型执行状态独立。保留 L2 的规则命中门槛、L3 的灰区门槛与默认升级上限。即时检测及快照预览按片段和文档返回执行状态，导出继续复用检测快照。
+
+## 下一步
+
+远端协作前先核对目标仓库与本地基线，再确认账号写权限或 fork 路径。后续可独立处理跨片段推理预算、模型就绪和真实/演示后端标识、任务级状态持久化。
+
+## 关键文件
+
+- 识别与 HTTP 契约：`server/app/identify/{pipeline,inference,l2,l3}.py`
+- 开关和返回值：`server/app/api/{deps,routes_detect,routes_tasks,routes_traffic,schemas}.py`、`web/src/api.js`
+- 用例：`server/tests/{test_api,test_pipeline,test_l2_service,test_l3_client}.py`、`web/test/api-snapshot.test.mjs`
+
+---
+
 # FlowMask 第一批核心安全修复交接 · 2026-11-05
 
 ## 当前状态

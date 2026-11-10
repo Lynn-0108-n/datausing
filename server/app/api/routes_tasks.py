@@ -28,8 +28,8 @@ MAX_BATCH_FILES = 20
 @router.post("/tasks", response_model=TaskCreateOut, summary="提交任务：上传文件")
 async def create_file_task(
     file: UploadFile = File(..., description="txt/json/csv/sql（Word/PDF 待接入）"),
-    enable_l2: bool = False,
-    enable_l3: bool = False,
+    enable_l2: bool | None = None,
+    enable_l3: bool | None = None,
     enable_ner: bool = False,
     mask_level: str | None = None,
     min_level: str = "SAFE",
@@ -47,8 +47,9 @@ async def create_file_task(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     options = build_options(
-        enable_l2=enable_l2 or settings.enable_l2,
-        enable_l3=enable_l3 or settings.enable_l3,
+        settings=settings,
+        enable_l2=enable_l2,
+        enable_l3=enable_l3,
         enable_ner=enable_ner or settings.enable_ner,
         mask_level=mask_level,
         min_level=min_level,
@@ -77,8 +78,9 @@ def create_text_task(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="text 不能为空")
     document = parse_text_input(text, source="text")
     options = build_options(
-        enable_l2=payload.enable_l2 or settings.enable_l2,
-        enable_l3=payload.enable_l3 or settings.enable_l3,
+        settings=settings,
+        enable_l2=payload.enable_l2,
+        enable_l3=payload.enable_l3,
         enable_ner=payload.enable_ner or settings.enable_ner,
         mask_level=payload.mask_level,
         min_level=payload.min_level,
@@ -102,8 +104,8 @@ def create_text_task(
 )
 async def create_batch_tasks(
     files: list[UploadFile] = File(..., description=f"一次最多 {MAX_BATCH_FILES} 个文件"),
-    enable_l2: bool = False,
-    enable_l3: bool = False,
+    enable_l2: bool | None = None,
+    enable_l3: bool | None = None,
     enable_ner: bool = False,
     mask_level: str | None = None,
     min_level: str = "SAFE",
@@ -126,8 +128,9 @@ async def create_batch_tasks(
         )
 
     options = build_options(
-        enable_l2=enable_l2 or settings.enable_l2,
-        enable_l3=enable_l3 or settings.enable_l3,
+        settings=settings,
+        enable_l2=enable_l2,
+        enable_l3=enable_l3,
         enable_ner=enable_ner or settings.enable_ner,
         mask_level=mask_level,
         min_level=min_level,

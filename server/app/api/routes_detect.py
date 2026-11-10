@@ -69,6 +69,7 @@ def _to_out(report: DocumentReport, document: Document, snapshot=None) -> Detect
                 hits=finding.hits,
                 masked=finding.masked,
                 model_chain=finding.model_chain,
+                engine_runs=finding.engine_runs,
                 reason=finding.reason,
                 degraded=finding.degraded,
                 direct=finding.direct,
@@ -80,6 +81,8 @@ def _to_out(report: DocumentReport, document: Document, snapshot=None) -> Detect
         by_level=report.by_level,
         duration_ms=report.duration_ms,
         degraded=report.degraded,
+        engine_runs=report.engine_runs,
+        coverage=report.coverage,
         masked_document=masked_document(document, report),
         **({
             'result_id': snapshot.result_id, 'source_fingerprint': snapshot.source_fingerprint,
@@ -132,8 +135,9 @@ def detect_text(
     except (ParseError, ValueError):
         raise SecurityError('SOURCE_PARSE_FAILED', '输入不符合指定格式') from None
     options = build_options(
-        enable_l2=payload.enable_l2 or settings.enable_l2,
-        enable_l3=payload.enable_l3 or settings.enable_l3,
+        settings=settings,
+        enable_l2=payload.enable_l2,
+        enable_l3=payload.enable_l3,
         enable_ner=settings.enable_ner if payload.enable_ner is None else payload.enable_ner,
         enable_keywords=payload.enable_keywords,
         mask_level=payload.mask_level,
@@ -147,8 +151,8 @@ async def detect_file(
     request: Request,
     response: Response,
     file: UploadFile = File(..., description="待检测文件"),
-    enable_l2: bool = False,
-    enable_l3: bool = False,
+    enable_l2: bool | None = None,
+    enable_l3: bool | None = None,
     enable_ner: bool | None = None,
     enable_keywords: bool | None = None,
     mask_level: str | None = None,
@@ -165,8 +169,9 @@ async def detect_file(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
     options = build_options(
-        enable_l2=enable_l2 or settings.enable_l2,
-        enable_l3=enable_l3 or settings.enable_l3,
+        settings=settings,
+        enable_l2=enable_l2,
+        enable_l3=enable_l3,
         enable_ner=settings.enable_ner if enable_ner is None else enable_ner,
         enable_keywords=enable_keywords,
         mask_level=mask_level,
@@ -242,15 +247,16 @@ def _analyze_export_document(
     *,
     settings: Settings,
     pipeline: DetectionPipeline,
-    enable_l2: bool,
-    enable_l3: bool,
+    enable_l2: bool | None,
+    enable_l3: bool | None,
     enable_ner: bool | None,
     enable_keywords: bool | None,
 ) -> DocumentReport:
     """导出用的在线分析：``min_level="SAFE"`` 保证拿回全量 finding，不受级别筛选影响。"""
     options = build_options(
-        enable_l2=enable_l2 or settings.enable_l2,
-        enable_l3=enable_l3 or settings.enable_l3,
+        settings=settings,
+        enable_l2=enable_l2,
+        enable_l3=enable_l3,
         enable_ner=settings.enable_ner if enable_ner is None else enable_ner,
         enable_keywords=enable_keywords,
         mask_level=None,
@@ -275,7 +281,10 @@ def _snapshot_download(request, settings, result_id, policy_version, strategy, f
             raise SecurityError('SNAPSHOT_OPTIONS_CHANGED', '检测选项已变化，请重新检测', 409)
     if payload is not None:
         for key in ('enable_l2', 'enable_l3', 'enable_ner', 'enable_keywords', 'min_level'):
-            if key in payload.model_fields_set and getattr(payload, key) != snapshot.options.get(key):
+            value = getattr(payload, key)
+            if key in ('enable_l2', 'enable_l3') and value is None:
+                continue
+            if key in payload.model_fields_set and value != snapshot.options.get(key):
                 raise SecurityError('SNAPSHOT_OPTIONS_CHANGED', '检测选项已变化，请重新检测', 409)
         if 'content_type' in payload.model_fields_set and payload.content_type != snapshot.document.content_type:
             raise SecurityError('SNAPSHOT_SOURCE_CHANGED', '输入格式与检测快照不一致', 409)
