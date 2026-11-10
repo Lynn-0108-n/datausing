@@ -1,7 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { renderHighlight, maskedDocumentText } from "../src/highlight.js";
-import { sourceSegments, countHits, safeError } from "../src/workspace.js";
+import { sourceSegments, countHits, safeError, snapshotClipboardText, snapshotOutputIssue } from "../src/workspace.js";
+
+test("clipboard consumes complete masked values and omits potentially sensitive paths", () => {
+  const result = {
+    result_id: "snapshot", policy_version: "v1", source_fingerprint: "hash",
+    coverage: "complete", segments: 2, content_type: "json", by_level: { L3: 1 },
+    masked_document: { segments: [{ path: '$["SECRET_KEY"]', masked: "[屏蔽]", text: "SECRET_VALUE" }] },
+  };
+  assert.equal(snapshotClipboardText(result), "[屏蔽]");
+  assert.match(snapshotOutputIssue({ ...result, by_level: { L3: 2 } }), /截断或丢段/);
+  assert.equal(snapshotOutputIssue({
+    ...result, content_type: "text", by_level: { L3: 0 },
+    masked_document: { masked: "无命中文本", segments: [] },
+  }), "");
+  assert.equal(snapshotClipboardText({ ...result, coverage: "partial" }), "");
+  assert.equal(snapshotClipboardText({ ...result, result_id: null }), "");
+  assert.equal(snapshotClipboardText({ ...result, masked_document: { segments: [{ text: "SECRET" }] } }), "");
+});
 
 test("JSON special keys and numeric values follow unambiguous backend paths", () => {
   const index = sourceSegments('{"a.b":"one","a":{"b":"two"},"":13800138000}', "json");

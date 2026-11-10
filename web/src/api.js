@@ -27,7 +27,7 @@ async function request(path, options = {}) {
     if (res.status === 401) {
       detail = "缺少或错误的 API Token：请在浏览器 localStorage 设置 flowmask_token（见 README）";
     }
-    throw new Error(`${res.status} ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+    throw Object.assign(new Error(`${res.status} ${typeof detail === "string" ? detail : JSON.stringify(detail)}`), { status: res.status });
   }
   return body;
 }
@@ -93,7 +93,7 @@ export async function downloadWithAuth(url, fallbackName) {
 // 脱敏文件导出走「带请求体的下载」：POST + JSON 或 multipart，响应是二进制附件，
 // 不能复用 request()（它会按 JSON 解析），也不能复用 downloadWithAuth（它只发 GET）。
 // 鉴权头照抄 authHeaders()，文件名优先取 Content-Disposition。
-export async function downloadWithBody(path, options, fallbackName = "flowmask-export.bin") {
+export async function downloadWithBody(path, options, fallbackName = "flowmask-export.bin", validateResponse) {
   const res = await fetch(BASE + path, { ...options, headers: authHeaders(options.headers) });
   if (!res.ok) {
     let detail = res.statusText;
@@ -106,9 +106,10 @@ export async function downloadWithBody(path, options, fallbackName = "flowmask-e
     if (res.status === 401) {
       detail = "缺少或错误的 API Token：请在浏览器 localStorage 设置 flowmask_token（见 README）";
     }
-    throw new Error(`${res.status} ${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
+    throw Object.assign(new Error(`${res.status} ${typeof detail === "string" ? detail : JSON.stringify(detail)}`), { status: res.status });
   }
   const blob = await res.blob();
+  validateResponse?.(res);
   const name = fileNameFromDisposition(res.headers.get("Content-Disposition")) || fallbackName;
   const objectUrl = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -232,10 +233,16 @@ export const api = {
     request(`/detect/results/${encodeURIComponent(result.result_id)}/preview`, jsonBody({
       strategy, policy_version: result.policy_version,
     })),
-  exportSnapshot: (result, strategy, fmt, fallbackName = "flowmask-masked.txt") =>
+  exportSnapshot: (result, strategy, fmt, fallbackName = "flowmask-masked.txt", isCurrent) =>
     downloadWithBody('/detect/export', jsonBody({
       result_id: result.result_id, policy_version: result.policy_version, strategy, fmt,
-    }), fallbackName),
+    }), fallbackName, (response) => {
+      if ((isCurrent && !isCurrent()) ||
+          response.headers.get("X-FlowMask-Result-Id") !== result.result_id ||
+          response.headers.get("X-FlowMask-Policy-Version") !== result.policy_version) {
+        throw Object.assign(new Error("409 snapshot changed"), { status: 409 });
+      }
+    }),
   // 文件入口：multipart，字段按契约平铺（strategy/fmt/enable_l2/enable_l3/enable_ner/enable_keywords）
   exportDetectFile: (file, opts = {}, fallbackName = "flowmask-masked.bin") => {
     const fd = new FormData();

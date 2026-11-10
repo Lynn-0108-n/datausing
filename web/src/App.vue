@@ -60,9 +60,11 @@ const groups = [
 ];
 const tabs = groups.flatMap((group) => group.tabs);
 const active = ref("detect");
+const mobileNavOpen = ref(false);
 function readHash() {
   const key = location.hash.slice(1);
   active.value = tabs.some((tab) => tab.key === key) ? key : "detect";
+  mobileNavOpen.value = false;
 }
 function focusMain() {
   document.getElementById("main-content")?.focus();
@@ -94,6 +96,7 @@ const healthError = ref(false);
 const refreshing = ref(false);
 const knownOperators = ref(["local"]);
 const isLocal = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+const serviceReady = computed(() => health.value?.status === "ok");
 const serviceLabel = computed(() =>
   healthError.value
     ? "服务未连接"
@@ -101,7 +104,7 @@ const serviceLabel = computed(() =>
       ? isLocal
         ? "本地服务已连接"
         : "服务已连接"
-      : "正在连接",
+      : health.value ? "服务异常" : "正在连接",
 );
 let timer;
 async function refreshHealth() {
@@ -154,18 +157,22 @@ onBeforeUnmount(() => {
     <a class="skip-link" href="#main-content" @click.prevent="focusMain"
       >跳到工作区</a
     >
-    <aside class="workspace-sidebar" aria-label="主导航">
+    <aside class="workspace-sidebar" :class="{ 'mobile-nav-open': mobileNavOpen }" aria-label="主导航">
       <a class="workspace-brand" href="#detect" title="FlowMask 工作台"
         ><span class="brand-mark"><AppIcon name="shield" :size="25" /></span
         ><span class="brand-word"
-          >FlowMask<small>PRIVACY WORKSPACE</small></span
+          >FlowMask<small>数据安全工作台</small></span
         ></a
       >
+      <button class="mobile-menu" type="button" aria-controls="workspace-nav" :aria-expanded="mobileNavOpen"
+        @click="mobileNavOpen = !mobileNavOpen">
+        <AppIcon name="down" :size="16" />导航
+      </button>
       <div class="workspace-label">
         <span class="workspace-avatar">F</span
         ><span>本地工作空间<small>隐私与数据安全</small></span>
       </div>
-      <nav class="nav-groups">
+      <nav id="workspace-nav" class="nav-groups">
         <section
           v-for="group in groups"
           :key="group.name"
@@ -183,6 +190,7 @@ onBeforeUnmount(() => {
             :class="{ active: active === tab.key }"
             :aria-current="active === tab.key ? 'page' : undefined"
             :title="collapsed ? tab.label : undefined"
+            @click="mobileNavOpen = false"
             ><AppIcon :name="tab.key" /><span>{{ tab.label }}</span
             ><i v-if="active === tab.key" class="nav-active-dot"
           /></a>
@@ -217,7 +225,7 @@ onBeforeUnmount(() => {
             <template #reference
               ><button
                 class="service-status"
-                :class="{ offline: healthError }"
+                :class="{ online: serviceReady, offline: healthError || (health && !serviceReady) }"
                 aria-label="查看服务与引擎状态"
               >
                 <i />{{ serviceLabel
@@ -246,10 +254,10 @@ onBeforeUnmount(() => {
                 </dd>
                 <dt>NER</dt>
                 <dd>
-                  {{ health?.ner ? health.ner_backend || "已就绪" : "未就绪" }}
+                  {{ health ? (health.ner ? health.ner_backend || "已就绪" : "未就绪") : "未知" }}
                 </dd>
                 <dt>OCR</dt>
-                <dd>{{ health?.ocr ? "已就绪" : "未就绪" }}</dd>
+                <dd>{{ health ? (health.ocr ? "已就绪" : "未就绪") : "未知" }}</dd>
               </dl>
               <p class="hint">
                 L2/L3 配置不代表模型在线，实际使用与降级以检测结果为准。
@@ -262,7 +270,19 @@ onBeforeUnmount(() => {
               >
             </div>
           </el-popover>
-          <span class="tool-divider" /><AppIcon name="terminal" :size="16" />
+          <el-popover placement="bottom-end" :width="280" trigger="click">
+            <template #reference>
+              <button class="icon-button" aria-label="使用帮助" title="使用帮助">
+                <AppIcon name="info" :size="18" />
+              </button>
+            </template>
+            <div class="system-popover">
+              <strong>工作台使用帮助</strong>
+              <p>粘贴文本或上传文件，核验脱敏副本后复制或导出。检测快捷键为 Ctrl / ⌘ + Enter。</p>
+              <a href="#tasks">查看任务与审计</a>
+            </div>
+          </el-popover>
+          <span class="tool-divider" />
           <el-select
             class="operator-select"
             :model-value="operator"
@@ -293,7 +313,7 @@ onBeforeUnmount(() => {
       </main>
       <footer class="workspace-footer">
         <span
-          ><i class="status-dot" :class="{ offline: healthError }" />{{
+          ><i class="status-dot" :class="{ online: serviceReady, offline: healthError || (health && !serviceReady) }" />{{
             serviceLabel
           }}</span
         ><span

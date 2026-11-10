@@ -112,17 +112,50 @@ export function countHits(findings = []) {
   return findings.reduce((sum, row) => sum + (Number(row.hits) || 0), 0);
 }
 
+export function snapshotOutputIssue(result) {
+  if (result.coverage === "partial" || result.degraded) return "检测覆盖不完整。请检查引擎状态后重新检测。";
+  if (!result.result_id || !result.policy_version || !result.source_fingerprint) {
+    return "服务端未提供可核验的检测快照，请重新检测。";
+  }
+  const document = result.masked_document;
+  const segments = document?.segments;
+  // 片段列表只包含有判定证据的记录。总片段数还包含无命中内容。
+  const counts = Object.values(result.by_level || {});
+  const expected = counts.reduce((sum, count) => sum + count, 0);
+  if (!Number.isInteger(result.segments) || result.segments <= 0 ||
+      !counts.length || counts.some((count) => !Number.isInteger(count) || count < 0) ||
+      expected > result.segments || !Array.isArray(segments) || segments.length !== expected ||
+      segments.some((segment) => typeof segment?.masked !== "string") ||
+      (result.content_type === "text" && typeof document.masked !== "string")) {
+    return "脱敏副本与已检测片段不匹配，可能存在截断或丢段。请缩小输入后重新检测。";
+  }
+  return "";
+}
+
+export function snapshotClipboardText(result) {
+  if (snapshotOutputIssue(result)) return "";
+  const document = result.masked_document;
+  // 路径可能含原始字段名，结构化内容交给服务端导出。
+  return result.content_type === "text"
+    ? document.masked
+    : document.segments.map((segment) => segment.masked).join("\n");
+}
+
+export function httpErrorStatus(error) {
+  return error?.status ?? Number(/^(\d{3})(?:\s|$)/.exec(error?.message || "")?.[1]);
+}
+
 export function safeError(
   error,
   fallback = "操作失败，请检查服务状态后重试。",
 ) {
   // 校验错误体可能带回原始 input，界面只保留状态码与可操作提示。
-  const status = /\b(400|401|403|413|415|422|429|500|502|503)\b/.exec(
-    String(error?.message || ""),
-  )?.[1];
+  const status = httpErrorStatus(error);
   const messages = {
     401: "访问令牌缺失或无效，请检查本机 API Token 配置。",
     403: "当前操作未获授权。",
+    409: "检测快照或策略已变化，请重新检测。",
+    410: "检测快照已过期，请重新检测。",
     413: "文件或文本超出服务端限制，请缩小输入后重试。",
     415: "不支持的文件格式，请选择服务端支持的格式。",
     422: "输入或参数无法解析，请检查文件内容和选项。",

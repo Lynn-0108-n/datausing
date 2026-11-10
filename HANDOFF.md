@@ -1,3 +1,26 @@
+# FlowMask B 方案前端改造交接 · 2026-11-11
+
+## 当前状态
+
+- 在 `codex/l2-l3` 完成冷白蓝工作台、54:46 双栏检测页和移动端导航。保留八个页面、主题偏好和已有 API。
+- 已验证 Vite 构建、18 个前端单测、20 个 Edge 端到端用例和 26 个 Python API 用例。验收截图在 `web/.qa/b-redesign/screenshots/`。
+
+## 已定决策
+
+不要重新讨论这些。输入、检测选项、操作人或路由变化会使快照失效。原文对照默认收起，仅展示本次粘贴的输入。复制与导出复验快照，策略、会话或覆盖异常时锁定。结构化复制只取脱敏值，完整结构由后端导出。
+
+## 下一步
+
+- 原说明的 PNG 与 HTML 参照未随附件提供。若补齐，可按同一用例更新视觉对照。
+- 服务端仅提供原文字符区间及已返回片段计数。解析器内部截断和脱敏后字符区间如需逐项标识，应先补 API 元数据。
+
+## 关键文件
+
+- `web/src/App.vue`、`web/src/style.css`、`web/src/views/DetectView.vue`
+- `web/src/api.js`、`web/src/workspace.js`、`web/test/e2e/workspace.spec.js`
+
+---
+
 # FlowMask L2 / L3 交接 · 2026-11-10
 
 ## 当前状态

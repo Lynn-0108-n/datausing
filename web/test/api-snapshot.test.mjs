@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { api } from '../src/api.js';
 
 const originalFetch = globalThis.fetch;
+const snapshotHeaders = {
+  "X-FlowMask-Result-Id": "snapshot",
+  "X-FlowMask-Policy-Version": "v1",
+};
 test.afterEach(() => {
   globalThis.fetch = originalFetch;
   delete globalThis.window;
@@ -29,11 +33,41 @@ test('snapshot export does not resubmit input or detection options', async () =>
   };
   globalThis.fetch = async (url, options) => {
     sent = { url, body: JSON.parse(options.body) };
-    return new Response('masked', { status: 200 });
+    return new Response('masked', { status: 200, headers: snapshotHeaders });
   };
   await api.exportSnapshot({ result_id: 'snapshot', policy_version: 'v1', text: '13800138000', enable_l3: true }, 'block', 'txt');
   assert.equal(sent.url, '/api/v1/detect/export');
   assert.deepEqual(sent.body, { result_id: 'snapshot', policy_version: 'v1', strategy: 'block', fmt: 'txt' });
+});
+
+test('a snapshot invalidated while downloading never creates a download link', async () => {
+  globalThis.window = { localStorage: { getItem: () => null } };
+  let current = true;
+  let clicked = false;
+  globalThis.document = {
+    createElement: () => ({ click() { clicked = true; }, remove() {} }),
+    body: { appendChild() {} },
+  };
+  globalThis.fetch = async () => {
+    current = false;
+    return new Response('masked', { status: 200, headers: snapshotHeaders });
+  };
+  await assert.rejects(
+    api.exportSnapshot({ result_id: 'snapshot', policy_version: 'v1' }, 'block', 'txt', 'masked.txt', () => current),
+    /409/,
+  );
+  assert.equal(clicked, false);
+});
+
+test('an export response from a different snapshot is not downloaded', async () => {
+  globalThis.window = { localStorage: { getItem: () => null } };
+  globalThis.fetch = async () => new Response('masked', {
+    headers: { ...snapshotHeaders, "X-FlowMask-Result-Id": "different" },
+  });
+  await assert.rejects(
+    api.exportSnapshot({ result_id: 'snapshot', policy_version: 'v1' }, 'block', 'txt'),
+    /409/,
+  );
 });
 
 test('uploads distinguish explicit model switches from omitted defaults', async () => {
