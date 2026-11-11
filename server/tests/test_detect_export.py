@@ -57,7 +57,10 @@ def test_export_text_returns_download(client) -> None:
     assert disposition.startswith('attachment; filename="flowmask-export-')
     assert disposition.endswith('.txt"')
     content = response.content.decode("utf-8")
-    assert "[已屏蔽:手机号]" in content
+    # L2 语义证据会给整段打上 requires_full_mask，block 策略按「整段 → 类别占位」处理，
+    # 不再按 span 逐值替换（见 app/tasks/document_export.py 的 _masked_texts）；
+    # 整段没有单一实体类别，类别占位回落到「其他」。
+    assert content.strip() == "[已屏蔽:其他]"
     for value in (NAME, PHONE, ID_CARD, EMAIL):
         assert value not in content
 
@@ -91,7 +94,8 @@ def test_export_encrypt_then_decrypt_roundtrip(client) -> None:
     restored = client.post("/api/v1/detect/decrypt", json={"ciphertext": ciphertext})
     assert restored.status_code == 200
     body = restored.json()
-    assert body["replaced"] >= 2
+    # 整段 requires_full_mask 时只有一个密文 token，解密只替换一次
+    assert body["replaced"] >= 1
     assert body["strategy"] == "encrypt"
     assert PHONE in body["text"] and ID_CARD in body["text"]
 
