@@ -120,6 +120,17 @@ def test_export_unknown_fmt_is_400(client) -> None:
     assert response.json()["detail"] == "不支持的输出格式"
 
 
+def test_export_text_to_structured_fmt_is_422(client) -> None:
+    """纯文本显式导成 csv/sql/json 会被拒绝：结构化格式必须与原文形态一致。
+
+    否则按目标格式重解析原文拿不到命中定位，会把未脱敏原文原样写回（历史实现曾如此）。
+    """
+    for fmt in ("csv", "sql", "json"):
+        response = client.post("/api/v1/detect/export", json=_export_body(fmt=fmt))
+        assert response.status_code == 422, fmt
+        assert PHONE not in response.text, fmt
+
+
 def test_export_invalid_content_type_is_400(client) -> None:
     # content_type=docx 只能走上传入口；这里正文不是 docx 二进制
     response = client.post("/api/v1/detect/export", json=_export_body(content_type="docx"))
