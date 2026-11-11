@@ -4,6 +4,8 @@
 
 - 在 `codex/l2-l3` 完成冷白蓝工作台、54:46 双栏检测页和移动端导航。保留八个页面、主题偏好和已有 API。
 - 已验证 Vite 构建、18 个前端单测、20 个 Edge 端到端用例和 26 个 Python API 用例。验收截图在 `web/.qa/b-redesign/screenshots/`。
+- 桌面 `D:\31387\Desktop\FlowMask.lnk` 调用的 `datausing-main/datausing-main/server/scripts/start_l2l3.ps1` 已更新，通过 `--app-dir` 使用当前工作区服务，通过 `FLOWMASK_FRONTEND_DIR` 使用当前 `web/dist`。继续使用桌面副本的数据与 .env，复用其 L2/L3 进程，重复启动会复用主服务。
+- 桌面入口已实测新双栏界面、合成手机号检测、快照预览和导出。入口为 `http://127.0.0.1:8090/app/`。启动脚本备份后缀为 `.before-ui-20261111-123859.bak`，数据库备份为桌面副本 `server/data/flowmask.before-ui-20261111-124152.db`。
 
 ## 已定决策
 
