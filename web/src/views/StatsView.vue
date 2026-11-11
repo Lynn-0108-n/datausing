@@ -65,9 +65,9 @@ function ensureChart(el) {
 // ECharts 是 canvas 渲染，颜色取自当前主题变量；切换主题时重建图表
 function axisTheme() {
   return {
-    text: cssVar("--ink", "#0f172a"),
-    muted: cssVar("--muted", "#64748b"),
-    border: cssVar("--border", "#e2e8f0"),
+    text: cssVar("--ink", "#24344d"),
+    muted: cssVar("--muted", "#71839d"),
+    border: cssVar("--border", "#dce7f5"),
   };
 }
 
@@ -154,7 +154,7 @@ function render() {
             type: "bar",
             data: counts,
             barMaxWidth: 34,
-            itemStyle: { color: cssVar("--accent", "#0d9488") },
+            itemStyle: { color: cssVar("--accent", "#5b96ed") },
           },
         ],
       },

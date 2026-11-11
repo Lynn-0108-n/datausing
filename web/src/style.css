@@ -1,30 +1,31 @@
 /* Precision Workspace：语义 Token 同时驱动业务页与 Element Plus。 */
 :root {
   color-scheme: light;
-  --bg: #f3f6fb;
+  --bg: #f5f9ff;
   --sidebar: #ffffff;
   --panel: #ffffff;
   --elevated: #ffffff;
   --pane-head: #f7faff;
-  --ink: #192b43;
-  --secondary: #53677f;
-  --muted: #5d718b;
-  --faint: #657991;
-  --border: #e2eaf3;
-  --accent: #2468df;
+  --ink: #24344d;
+  --secondary: #4a5f7c;
+  --muted: #71839d;
+  --faint: #8ba0bc;
+  --border: #dce7f5;
+  --accent: #5b96ed;
   --accent-ink: #ffffff;
   --accent-soft: #eaf2ff;
-  --danger: #c84040;
-  --warning: #99600d;
-  --info: #356caa;
-  --success: #07856e;
-  --danger-soft: #fbe9ed;
-  --warning-soft: #fcf1df;
-  --info-soft: #e9f1fb;
-  --success-soft: #e4f4ed;
-  --shadow: 0 8px 32px #192b430b;
+  --danger: #d64545;
+  --warning: #b57f14;
+  --info: #4a87e4;
+  --success: #3fa26b;
+  --danger-soft: #fbeaea;
+  --warning-soft: #fdf3e2;
+  --info-soft: #eaf2ff;
+  --success-soft: #e8f6ef;
+  --shadow: 0 6px 20px #24344d0f;
   --font-ui:
-    "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+    "Manrope", "Noto Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei",
+    system-ui, sans-serif;
   --font-mono:
     "Cascadia Code", "SFMono-Regular", Consolas, "Microsoft YaHei UI", monospace;
   --space-1: 4px;
@@ -36,34 +37,34 @@
   --space-8: 32px;
   --radius-sm: 6px;
   --radius-md: 9px;
-  --radius-lg: 16px;
+  --radius-lg: 18px;
   --motion-fast: 140ms;
   --motion-panel: 200ms;
 }
 html.dark {
   color-scheme: dark;
-  --bg: #0b0d10;
-  --sidebar: #101318;
-  --panel: #15191f;
-  --elevated: #1b2028;
-  --pane-head: #181d24;
-  --ink: #edf0f4;
-  --secondary: #b4beca;
-  --muted: #9aa4b2;
-  --faint: #8290a1;
-  --border: #2a3039;
-  --accent: #45d6c0;
-  --accent-ink: #08251f;
-  --accent-soft: #17332f;
-  --danger: #ef7d8c;
-  --warning: #e6b467;
-  --info: #87b7f4;
-  --success: #58d6a7;
-  --danger-soft: #3a222b;
-  --warning-soft: #382f22;
-  --info-soft: #213047;
-  --success-soft: #1b332b;
-  --shadow: 0 8px 32px #0004;
+  --bg: #0e1520;
+  --sidebar: #121a26;
+  --panel: #151e2b;
+  --elevated: #1a2534;
+  --pane-head: #17202e;
+  --ink: #e8eef7;
+  --secondary: #b8c6d8;
+  --muted: #93a4b9;
+  --faint: #7e8fa6;
+  --border: #24303f;
+  --accent: #76a9fa;
+  --accent-ink: #0b1522;
+  --accent-soft: #1b2b42;
+  --danger: #e88a8a;
+  --warning: #e0b567;
+  --info: #8fbdf5;
+  --success: #6fd0a0;
+  --danger-soft: #331f22;
+  --warning-soft: #322a1c;
+  --info-soft: #17263a;
+  --success-soft: #1a2f27;
+  --shadow: 0 8px 32px #0006;
 }
 :root,
 html.dark {

@@ -945,7 +945,7 @@ onMounted(async () => {
         </el-select>
       </el-form-item>
     </el-form>
-    <div v-if="suggestError" class="hint-line" style="color: #dc2626">
+    <div v-if="suggestError" class="hint-line" style="color: var(--danger)">
       {{ suggestError }}
     </div>
     <div v-if="suggestResult" style="margin-top: 12px">
@@ -1001,7 +1001,7 @@ onMounted(async () => {
       placeholder="粘贴含 enc: 密文的脱敏文本"
       style="margin-top: 10px"
     />
-    <div v-if="decryptError" class="hint-line" style="color: #dc2626">
+    <div v-if="decryptError" class="hint-line" style="color: var(--danger)">
       {{ decryptError }}
     </div>
     <div v-if="decryptResult" style="margin-top: 12px">
