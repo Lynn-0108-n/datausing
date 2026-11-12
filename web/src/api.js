@@ -156,6 +156,8 @@ export const api = {
   task: (id) => request(`/tasks/${id}`),
   taskFindings: (id, page = 1, pageSize = 50) =>
     request(`/tasks/${id}/findings?page=${page}&page_size=${pageSize}`),
+  taskComparison: (id, signal) => request(`/tasks/${id}/comparison`, { signal, cache: "no-store" }),
+  taskComparisonDownloadUrl: (id) => `${BASE}/tasks/${id}/comparison/download`,
   taskExportUrl: (id, fmt) => `${BASE}/tasks/${id}/export?format=${fmt}`,
   privacyExport: (id, epsilon, l) =>
     request(`/tasks/${id}/export/privacy?format=json&epsilon=${epsilon}&l=${l}`),

@@ -328,7 +328,7 @@ test("batch submits real files, isolates failure, exports and clears upload stat
     page.locator(".panel-title").filter({ hasText: "结果明细" }),
   ).toBeVisible();
   const downloaded = page.waitForEvent("download");
-  await good.getByRole("button", { name: "导出", exact: true }).click();
+  await good.getByRole("button", { name: "明细", exact: true }).click();
   expect((await downloaded).suggestedFilename()).toContain("jsonl");
   await page.getByRole("button", { name: "清空文件", exact: true }).click();
   await expect(page.locator(".el-upload-list__item")).toHaveCount(0);

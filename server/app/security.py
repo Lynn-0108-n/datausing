@@ -63,17 +63,20 @@ def protected_spans(text: str, spans: list[dict]) -> list[dict]:
     return merged
 
 
-def protected_text(text: str, finding, requested_level=None) -> str:
+def protected_text(text: str, finding, requested_level=None, mappings=None) -> str:
     """持久化和未授权视图至少partial；高危或更强请求使用block。"""
     from .identify.masking import mask_spans_with_strategy
     from .identify.types import Level
 
     spans = protected_spans(text, finding.spans)
     if not spans or finding.requires_full_mask:
+        if mappings is not None and text != '[已屏蔽:敏感信息]':
+            mappings.append(dict(start=0, end=len(text), masked_start=0, masked_end=len('[已屏蔽:敏感信息]'),
+                                 type=','.join(finding.types), strategy='block', full_segment=True))
         return '[已屏蔽:敏感信息]'  # 有类别证据但无精确位置时，不沿用可能含原值的副本
     high = finding.level == Level.HIGH or requested_level == Level.HIGH
     try:
-        return mask_spans_with_strategy(text, spans, 'block' if high else 'partial')
+        return mask_spans_with_strategy(text, spans, 'block' if high else 'partial', mappings=mappings)
     except SecurityError:
         raise
     except Exception:

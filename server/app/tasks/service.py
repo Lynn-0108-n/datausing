@@ -79,6 +79,8 @@ def create_task(
     document: Document,
     options: DetectOptions,
     pipeline: DetectionPipeline | None = None,
+    comparison_owner: str = "",
+    comparison_secret: str = "",
 ) -> str:
     """建任务并异步执行，立刻返回 task_id。"""
     task_id = uuid.uuid4().hex[:16]
@@ -105,7 +107,7 @@ def create_task(
     runner = pipeline or DetectionPipeline.from_settings(_settings())
     thread = threading.Thread(
         target=_execute,
-        args=(db, task_id, document, options, runner),
+        args=(db, task_id, document, options, runner, comparison_owner, comparison_secret),
         name=f"flowmask-task-{task_id}",
         daemon=True,
     )
@@ -125,6 +127,8 @@ def _execute(
     document: Document,
     options: DetectOptions,
     pipeline: DetectionPipeline,
+    comparison_owner: str = "",
+    comparison_secret: str = "",
 ) -> None:
     """后台执行体：任何异常都要落成 failed 状态，不让任务永远卡在 running。"""
     failure_code = 'TASK_PERSISTENCE_FAILED'
@@ -147,6 +151,15 @@ def _execute(
                 raise SecurityError('MASK_LOCATION_INVALID', '任务结果与来源不一致')
             finding.masked = protected_text(segment.text, finding, options.mask_level)
 
+        if comparison_owner:
+            from ..identify.snapshots import get_snapshot_store
+            try:
+                get_snapshot_store().put(document, report,
+                    {'mask_level': options.mask_level.value if options.mask_level else None},
+                    _hash(document.raw), POLICY_VERSION, comparison_owner, comparison_secret,
+                    result_id='task:' + task_id)
+            except SecurityError:
+                pass  # 超出快照预算不影响原有任务；对比入口返回不可用。
         failure_code = 'TASK_PERSISTENCE_FAILED'
         with db.write() as conn:
             inserted: list[tuple[int, Any]] = []

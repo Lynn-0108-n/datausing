@@ -272,6 +272,7 @@ def mask_spans_with_strategy(
     spans: object,
     strategy: str,
     secret: str = "",
+    mappings: list | None = None,
 ) -> str:
     """按 ``spans``（dict 或带 start/end/type 属性的对象）脱敏整段文本。
 
@@ -296,13 +297,24 @@ def mask_spans_with_strategy(
 
     parts: list[str] = []
     cursor = len(text)
+    edits = []
     for start, end, entity in sorted(cleaned, key=lambda item: item[0], reverse=True):
         if end > cursor:
             continue
         parts.append(text[end:cursor])
-        parts.append(mask_value_strategy(text[start:end], entity, key, secret))
+        replacement = mask_value_strategy(text[start:end], entity, key, secret)
+        parts.append(replacement)
+        edits.append((start, end, entity, replacement))
         cursor = start
     parts.append(text[:cursor])
+    if mappings is not None:
+        shift = 0
+        for start, end, entity, replacement in reversed(edits):
+            if replacement != text[start:end]:
+                mappings.append(dict(start=start, end=end, masked_start=start + shift,
+                                     masked_end=start + shift + len(replacement),
+                                     type=getattr(entity, 'value', entity), strategy=key))
+            shift += len(replacement) - (end - start)
     return "".join(reversed(parts))
 
 

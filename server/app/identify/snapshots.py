@@ -104,7 +104,7 @@ class SnapshotStore:
             self._items.clear()
             self.total_bytes = 0
 
-    def put(self, document, report, options, source_hash, revision, owner, secret):
+    def put(self, document, report, options, source_hash, revision, owner, secret, result_id=None):
         size = memory_size((document, report, options), self.max_bytes)
         with self._lock:
             self._expire()
@@ -112,7 +112,7 @@ class SnapshotStore:
                 raise security.SecurityError('SNAPSHOT_CAPACITY', '检测快照超过内存预算，请缩小输入', 503)
             while self._items and (len(self._items) >= self.max_items or self.total_bytes + size > self.max_bytes):
                 self._remove(next(iter(self._items)))
-            entry = Snapshot(secrets.token_urlsafe(32), owner, source_hash, revision,
+            entry = Snapshot(result_id or secrets.token_urlsafe(32), owner, source_hash, revision,
                              security.POLICY_VERSION, fingerprint(secret), self.clock() + self.ttl,
                              deepcopy(document), deepcopy(report), deepcopy(options), size)
             self._items[entry.result_id] = entry

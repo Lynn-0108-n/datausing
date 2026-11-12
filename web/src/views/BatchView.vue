@@ -1,5 +1,6 @@
 <script setup>
 import { safeError } from "../workspace";
+import DocumentComparison from "../components/DocumentComparison.vue";
 import PageHeader from "../components/PageHeader.vue";
 import AppIcon from "../components/AppIcon.vue";
 import RiskIndicator from "../components/RiskIndicator.vue";
@@ -8,6 +9,7 @@ import { computed, onBeforeUnmount, reactive, ref } from "vue";
 import { ElMessage } from "element-plus";
 import { api, downloadWithAuth } from "../api";
 
+const comparison = ref(null);
 const MAX_FILES = 20;
 const files = ref([]);
 const uploadRef = ref(null);
@@ -48,6 +50,7 @@ function onChange(uploadFile, uploadFiles) {
 }
 
 function clearAll() {
+  comparison.value = null;
   uploadRef.value?.clearFiles();
   files.value = [];
   rows.value = [];
@@ -178,6 +181,11 @@ async function downloadTask(row) {
   }
 }
 
+async function downloadDocument(row) {
+  try { await downloadWithAuth(api.taskComparisonDownloadUrl(row.taskId), "flowmask-masked.txt"); }
+  catch { ElMessage.error("无法下载脱敏文档，快照可能已过期，请重新提交文件。"); }
+}
+
 function statusType(status) {
   if (status === "done") return "success";
   if (status === "failed" || status === "解析失败") return "danger";
@@ -200,6 +208,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
+  <DocumentComparison v-if="comparison" :task-id="comparison.taskId" :filename="comparison.filename" @close="comparison = null" />
   <PageHeader
     title="批量检测"
     description="多文件并行处理，逐项追踪进度与失败原因。"
@@ -299,7 +308,7 @@ onBeforeUnmount(() => {
             }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="150">
+        <el-table-column label="操作" width="260">
           <template #default="{ row }">
             <el-button
               link
@@ -309,14 +318,16 @@ onBeforeUnmount(() => {
               @click="openTask(row)"
               >查看</el-button
             >
+            <el-button link type="primary" size="small" :disabled="row.status !== 'done'" @click="comparison = row">对比</el-button>
             <el-button
               link
               type="success"
               size="small"
               :disabled="!row.taskId"
               @click="downloadTask(row)"
-              >导出</el-button
+              >明细</el-button
             >
+            <el-button link type="primary" size="small" :disabled="row.status !== 'done'" @click="downloadDocument(row)">脱敏文件</el-button>
           </template>
         </el-table-column>
         <el-table-column

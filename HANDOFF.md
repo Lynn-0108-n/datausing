@@ -1,3 +1,30 @@
+# FlowMask 批量文档对比交接 · 2026-11-12
+
+## 当前状态
+
+已完成批量结果“查看 / 对比 / 明细 / 脱敏文件”、独立对比弹窗、字符级高亮、双向定位、映射同步滚动、差异导航、单栏/双栏、换行、虚拟行和 TXT 下载。原 JSONL 导出保留为“明细”。Python 一体机版本资源同步 0.27.1；未打包、未部署、未发布。
+
+验证：后端 748 通过、5 跳过；Node 38 通过；Edge Playwright 全量 30 通过；Vite 构建通过。测试仅使用隔离数据库。临时测试服务已停止。
+
+## 已定决策
+
+不要重新讨论这些：原文不落库。新批量任务复用现有 HttpOnly 会话 + Authorization 指纹隔离的 SnapshotStore（默认 5 分钟、32 个、32 MiB 共用预算）；历史/过期/淘汰快照不恢复原文。共享脱敏算子生成码点区间，前端不搜索原值、不模拟脱敏。对比与下载复验实际任务副本一致；权限/密钥/策略异常即拒绝。
+
+结构化和 Office/PDF 使用解析片段视图，不还原原文件版式；下载为按片段顺序连接、与右侧一致的 UTF-8 TXT。原有 JSONL 是检测明细。前端关闭时取消请求并清除模型；服务端依旧按 TTL 清理，不承诺强制擦除堆内存。
+
+## 下一步
+
+当前功能已完成。使用本地现有桌面入口前需更新/重启对应 Python 服务并指向当前 web/dist；本轮未操作桌面入口。若未来需要完整 DOCX/PDF 版式对比或原格式下载，独立扩展解析位置与文档导出映射，不退回模糊搜索或长期存原文。
+
+## 关键文件
+
+- `docs/文档对比.md`：完整协议、安全、限制、测试和实际文件清单。
+- `web/src/views/BatchView.vue`、`web/src/components/DocumentComparison.vue`、`web/src/components/DocumentPane.vue`、`web/src/comparison.js`、`web/src/api.js`。
+- `server/app/api/routes_tasks.py`、`server/app/tasks/comparison.py`、`server/app/tasks/service.py`、`server/app/identify/{masking,snapshots}.py`、`server/app/security.py`。
+- `server/tests/test_comparison.py`、`web/test/comparison.test.mjs`、`web/test/e2e/{comparison,workspace}.spec.js`。
+
+---
+
 # FlowMask B 方案前端改造交接 · 2026-11-11
 
 ## 当前状态
