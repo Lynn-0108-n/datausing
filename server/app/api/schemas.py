@@ -116,6 +116,9 @@ class FindingOut(BaseModel):
     rule_id: str | None = None
     degraded: bool = False
     created_at: str
+    type_labels: list[str] = Field(default_factory=list, description="类别中文名，顺序与 types 一致")
+    source: str = Field(default="", description="任务来源：文件名或 text")
+    content_type: str = Field(default="", description="任务内容形态：text/json/csv/sql/…")
 
 
 class FindingPage(BaseModel):
@@ -134,11 +137,17 @@ class TaskPage(BaseModel):
 
 class StatsOut(BaseModel):
     total_findings: int
-    tasks: int
+    tasks: int = Field(description="筛选范围内有检测记录的任务数（去重）")
     by_level: dict[str, int] = Field(description="分级分布（饼图）")
-    by_type: list[dict[str, Any]] = Field(description="类别 TopN（柱状图）")
+    by_type: list[dict[str, Any]] = Field(description="类别 TopN：type/label/count/hits/levels")
     score_histogram: dict[str, int] = Field(description="分数直方图")
     task_id: str | None = None
+    total_hits: int = 0
+    tasks_total: int = Field(default=0, description="全库任务总数（兼容旧 tasks 语义）")
+    by_day: list[dict[str, Any]] = Field(default_factory=list, description="按当地日趋势")
+    risk: dict[str, Any] = Field(default_factory=dict, description="告警处置口径的同筛选统计")
+    dimensions: dict[str, Any] = Field(default_factory=dict, description="维度字典（不受筛选影响）")
+    filter: dict[str, Any] = Field(default_factory=dict, description="当前筛选回显")
 
 
 class AlertOut(BaseModel):
@@ -151,6 +160,9 @@ class AlertOut(BaseModel):
     level_label: str = Field(description="级别中文名：高危 / 中危 / 低危")
     severity: str = Field(description="告警等级：紧急 / 重要 / 提示")
     types: list[str] = Field(description="英文类别键")
+    type_labels: list[str] = Field(default_factory=list, description="类别中文名，顺序与 types 一致")
+    source: str = Field(default="", description="任务来源：文件名或 text")
+    content_type: str = Field(default="", description="任务内容形态：text/json/csv/sql/…")
     score: float
     path: str = Field(description="触发告警的片段位置")
     title: str
@@ -176,6 +188,9 @@ class AlertSummaryOut(BaseModel):
     by_level: dict[str, int] = Field(description="按级别分布")
     by_status: dict[str, int] = Field(description="按状态分布")
     task_id: str | None = None
+    handled: int = Field(default=0, description="ack + ignored（已接手处置，不代表已完成）")
+    handled_ratio: float = Field(default=0.0, description="handled / total，total=0 时为 0.0")
+    open_by_level: dict[str, int] = Field(default_factory=dict, description="按级别的待处理数")
 
 
 class AlertAckIn(BaseModel):
@@ -589,8 +604,13 @@ class AssistantAdviseIn(BaseModel):
     by_level: dict[str, int] = Field(default_factory=dict)
     by_type: list[dict[str, Any]] = Field(default_factory=list)
     total_findings: int = 0
-    tasks: int = 0
+    tasks: int = Field(default=0, description="筛选范围内有检测记录的任务数（不再表示待处理任务数）")
     scenario: str | None = None
+    scope: str = Field(default="", description="统计范围前缀，如「近 30 天」")
+    total_alerts: int = 0
+    open_alerts: int = 0
+    handled_ratio: float | None = Field(default=None, description="已处置告警占比；None 表示未提供")
+    open_by_level: dict[str, int] = Field(default_factory=dict)
 
 
 class AssistantAdviseOut(BaseModel):
