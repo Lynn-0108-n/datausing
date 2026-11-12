@@ -27,9 +27,11 @@ class SecurityError(Exception):
 
 async def security_error_response(_request, exc: SecurityError):
     logger.warning("%s error_id=%s", exc.code, exc.error_id)
+    # 安全错误响应只含稳定错误码/关联号，不含原文；统一禁止缓存，
+    # 避免 4xx（如 410 快照过期）被浏览器或代理启发式缓存后影响重试。
     return JSONResponse(status_code=exc.status_code, content={
         "detail": exc.message, "code": exc.code, "error_id": exc.error_id,
-    })
+    }, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
 
 async def validation_error_response(_request, exc):

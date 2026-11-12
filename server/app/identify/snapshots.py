@@ -110,6 +110,9 @@ class SnapshotStore:
             self._expire()
             if size > self.max_bytes or self.max_items < 1:
                 raise security.SecurityError('SNAPSHOT_CAPACITY', '检测快照超过内存预算，请缩小输入', 503)
+            # 同 result_id 覆盖（如任务重试）先释放旧条目的记账，避免预算虚高提前淘汰。
+            if result_id and result_id in self._items:
+                self._remove(result_id)
             while self._items and (len(self._items) >= self.max_items or self.total_bytes + size > self.max_bytes):
                 self._remove(next(iter(self._items)))
             entry = Snapshot(result_id or secrets.token_urlsafe(32), owner, source_hash, revision,

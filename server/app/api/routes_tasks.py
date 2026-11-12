@@ -259,6 +259,10 @@ def export_task(
     )
 
 
+# 对比响应可能含原文，成功与失败路径都不得被缓存（错误路径见 security_error_response）。
+_COMPARE_HEADERS = {'Cache-Control': 'no-store', 'Pragma': 'no-cache'}
+
+
 @router.get('/tasks/{task_id}/comparison', summary='当前会话的临时文档对比')
 def task_comparison(task_id: str, request: Request, response: Response,
                     settings: Settings = Depends(settings_dep), db: Database = Depends(db_dep)):
@@ -267,12 +271,11 @@ def task_comparison(task_id: str, request: Request, response: Response,
     from ..tasks.comparison import comparison_payload
     task = get_task(db, task_id)
     if task is None:
-        raise HTTPException(404, '任务不存在')
+        raise HTTPException(404, '任务不存在', headers=_COMPARE_HEADERS)
     if task['status'] != 'done':
-        raise HTTPException(409, '任务未完成或脱敏失败')
+        raise HTTPException(409, '任务未完成或脱敏失败', headers=_COMPARE_HEADERS)
+    response.headers.update(_COMPARE_HEADERS)
     snapshot = get_snapshot_store().get('task:' + task_id, _owner(request), settings.export_secret)
-    response.headers['Cache-Control'] = 'no-store'
-    response.headers['Pragma'] = 'no-cache'
     return comparison_payload(snapshot)
 
 
@@ -282,5 +285,5 @@ def download_comparison(task_id: str, request: Request, response: Response,
     payload = task_comparison(task_id, request, response, settings, db)
     # 文本与对比片段逐字一致；结构化/Office 文件按解析片段顺序输出，不伪造原始排版。
     return Response('\n'.join(s['masked'] for s in payload['segments']), media_type='text/plain; charset=utf-8',
-                    headers={'Cache-Control': 'no-store', 'Content-Disposition':
+                    headers={**_COMPARE_HEADERS, 'Content-Disposition':
                              'attachment; filename="flowmask-masked.txt"'})

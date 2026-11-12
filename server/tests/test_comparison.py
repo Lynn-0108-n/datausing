@@ -1,6 +1,6 @@
 import time
 import pytest
-from app.identify.snapshots import get_snapshot_store
+from app.identify.snapshots import SnapshotStore, get_snapshot_store
 from app.identify.masking import mask_spans_with_strategy
 
 
@@ -76,3 +76,44 @@ def test_comparison_size_limit(client, monkeypatch):
     item = client.post('/api/v1/tasks/batch', files=[('files', ('big.txt', b'hello world'))]).json()['items'][0]
     wait(client, item['task_id'])
     assert client.get(f"/api/v1/tasks/{item['task_id']}/comparison").status_code == 413
+
+
+def test_comparison_error_responses_disable_cache(client):
+    """错误路径也不得被缓存：404/410 响应带 no-store/no-cache。"""
+    item = client.post('/api/v1/tasks/batch', files=[('files', ('cache.txt', b'hello'))]).json()['items'][0]
+    wait(client, item['task_id'])
+    url = f"/api/v1/tasks/{item['task_id']}/comparison"
+    missing = client.get('/api/v1/tasks/not-exist/comparison')
+    assert missing.status_code == 404
+    assert missing.headers['cache-control'] == 'no-store'
+    assert missing.headers['pragma'] == 'no-cache'
+    get_snapshot_store().clear()
+    expired = client.get(url)
+    assert expired.status_code == 410
+    assert expired.headers['cache-control'] == 'no-store'
+    assert expired.headers['pragma'] == 'no-cache'
+
+
+def test_snapshot_put_same_result_id_does_not_double_count():
+    """同一 result_id 覆盖写不能重复累计内存预算（否则提前触发 503/淘汰）。"""
+    store = SnapshotStore(max_items=4, max_bytes=1 << 20)
+    kwargs = dict(source_hash='hash', revision='rev', owner='owner', secret='secret',
+                  result_id='task:dup')
+    store.put({'doc': 'x'}, {'report': 'y'}, {'mask_level': None}, **kwargs)
+    first = store.total_bytes
+    store.put({'doc': 'x'}, {'report': 'y'}, {'mask_level': None}, **kwargs)
+    assert store.total_bytes == first
+    assert len(store._items) == 1
+
+
+def test_snapshot_write_failure_does_not_fail_task(client, monkeypatch):
+    """对比快照写入异常只是失去对比入口，检测任务本身仍应成功落库。"""
+    store = get_snapshot_store()
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError('simulated snapshot failure')
+
+    monkeypatch.setattr(store, 'put', broken)
+    item = client.post('/api/v1/tasks/batch', files=[('files', ('snap.txt', '电话：13800138000'.encode()))]).json()['items'][0]
+    wait(client, item['task_id'])
+    assert client.get(f"/api/v1/tasks/{item['task_id']}/comparison").status_code == 410

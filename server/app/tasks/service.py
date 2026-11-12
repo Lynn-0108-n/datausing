@@ -158,8 +158,10 @@ def _execute(
                     {'mask_level': options.mask_level.value if options.mask_level else None},
                     _hash(document.raw), POLICY_VERSION, comparison_owner, comparison_secret,
                     result_id='task:' + task_id)
-            except SecurityError:
-                pass  # 超出快照预算不影响原有任务；对比入口返回不可用。
+            except Exception:  # noqa: BLE001 - 快照只是对比用的短时缓存，失败不能影响既有任务
+                # 只记录稳定错误码与关联号，不写文档内容/异常文本，避免原文进日志。
+                logger.warning('SNAPSHOT_WRITE_FAILED task_id=%s error_id=%s',
+                               task_id, uuid.uuid4().hex)
         failure_code = 'TASK_PERSISTENCE_FAILED'
         with db.write() as conn:
             inserted: list[tuple[int, Any]] = []
