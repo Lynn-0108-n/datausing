@@ -1,3 +1,5 @@
+import { buildQueryString } from "./stats.js";
+
 const BASE = "/api/v1";
 
 // 服务端配了 FLOWMASK_API_TOKEN 时，所有请求都要带 Bearer；
@@ -123,6 +125,13 @@ export async function downloadWithBody(path, options, fallbackName = "flowmask-e
   return name;
 }
 
+// 统计接口兼容旧调用 api.stats(taskIdString)（BatchView 还在用），也接受对象查询；
+// 其余新增接口一律对象参数，查询串统一交给 buildQueryString 处理空值/数组。
+function normalizeStatsParams(params) {
+  if (typeof params === "string") return params ? { task_id: params } : {};
+  return params && typeof params === "object" ? params : {};
+}
+
 export const api = {
   health: () => request("/health"),
   formats: () => request("/formats"),
@@ -153,7 +162,27 @@ export const api = {
   privacyExportUrl: (id, epsilon, l) =>
     `${BASE}/tasks/${id}/export/privacy?format=jsonl&epsilon=${epsilon}&l=${l}`,
 
-  stats: (taskId) => request(`/stats${taskId ? `?task_id=${taskId}` : ""}`),
+  // 统计看板：参数含 task_id/level/types/content_type/start/end/days/tz_offset（见 web/src/stats.js）。
+  stats: (params = {}) => request(`/stats${buildQueryString(normalizeStatsParams(params))}`),
+  // 检测记录（findings）：看板「全部检测记录」与告警详情抽屉共用同一套筛选参数
+  findings: (params = {}) => request(`/findings${buildQueryString(params)}`),
+  finding: (id) => request(`/findings/${encodeURIComponent(id)}`),
+  // 风险处置队列：服务端分页 + 状态筛选（open/ack/ignored），参数与统计一致
+  alerts: (params = {}) => request(`/alerts${buildQueryString(params)}`),
+  alertSummary: (params = {}) => request(`/alerts/summary${buildQueryString(params)}`),
+  // 认领/忽略告警：操作人取自主题模块的 operator，放请求头 X-Operator-Id（与后端审计口径一致）。
+  // 这里用动态 import("./theme.js") 而非静态 import：theme.js 目前用无扩展名的 "./api" 引用本文件，
+  // Node 的 ESM 测试（api-snapshot.test.mjs）无法解析这种写法的依赖，静态 import 会让测试加载失败。
+  ackAlert: async (id, status, note) => {
+    const { operator } = await import("./theme.js");
+    const payload = { status };
+    const trimmed = note === undefined || note === null ? "" : String(note).trim();
+    if (trimmed) payload.note = trimmed.slice(0, 200);
+    return request(`/alerts/${encodeURIComponent(id)}/ack`, {
+      ...jsonBody(payload),
+      headers: { "Content-Type": "application/json", "X-Operator-Id": operator?.value || "local" },
+    });
+  },
   audit: (page = 1, pageSize = 20) => request(`/audit?page=${page}&page_size=${pageSize}`),
   auditVerify: () => request("/audit/verify"),
 
