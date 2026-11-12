@@ -3,6 +3,7 @@
 # 用法（在任意目录）：
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create_shortcut.ps1
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create_shortcut.ps1 -Mode stop
+#   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create_shortcut.ps1 -Mode web
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\create_shortcut.ps1 -ExePath D:\tools\FlowMask.exe -Name "FlowMask 演示"
 #
 # 说明：
@@ -10,11 +11,13 @@
 #   解包目录固定在工作目录下的 .flowmask-tmp，指错目录时可能因没有写权限而闪退；
 # - 停止快捷方式调用 scripts\stop_flowmask.cmd（内部是 FlowMask.exe --stop），
 #   不依赖模型/服务状态，点了就退出后台实例；
+# - 网页端快捷方式（-Mode web）调用 scripts\open_web.ps1：服务已在跑就直接开
+#   http://127.0.0.1:8090/app/，没在跑则先在后台拉起再打开；
 # - 桌面路径用系统「桌面」特殊文件夹解析，兼容桌面被重定向到其它盘的情况。
 
 [CmdletBinding()]
 param(
-    [ValidateSet("start", "stop")]
+    [ValidateSet("start", "stop", "web")]
     [string]$Mode = "start",
     [string]$ExePath = "",
     [string]$Name = "",
@@ -24,14 +27,6 @@ param(
 $ErrorActionPreference = "Stop"
 
 $serverDir = Split-Path $PSScriptRoot -Parent
-if (-not $ExePath) {
-    $ExePath = Join-Path $serverDir "dist_exe\FlowMask.exe"
-}
-if (-not (Test-Path -LiteralPath $ExePath)) {
-    throw "找不到 exe：$ExePath（先运行 scripts\build_exe.ps1 打包）"
-}
-$exeFull = (Resolve-Path -LiteralPath $ExePath).Path
-$exeDir = Split-Path $exeFull -Parent
 
 $desktop = (New-Object -ComObject WScript.Shell).SpecialFolders.Item("Desktop")
 if (-not (Test-Path -LiteralPath $desktop)) {
@@ -39,6 +34,45 @@ if (-not (Test-Path -LiteralPath $desktop)) {
 }
 
 $shell = New-Object -ComObject WScript.Shell
+
+if ($Mode -eq "web") {
+    if (-not $Name) { $Name = "FlowMask 网页端" }
+    if (-not $Description) { $Description = "打开 FlowMask 网页端（服务未运行时会自动启动）" }
+    $openWeb = Join-Path $serverDir "scripts\open_web.ps1"
+    if (-not (Test-Path -LiteralPath $openWeb)) {
+        throw "找不到网页端脚本：$openWeb"
+    }
+    $powershellExe = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $iconPath = Join-Path $serverDir "assets\flowmask.ico"
+    if (-not (Test-Path -LiteralPath $iconPath)) {
+        $iconPath = Join-Path $serverDir "dist_exe\FlowMask.exe"
+    }
+    $lnkPath = Join-Path $desktop "$Name.lnk"
+    $shortcut = $shell.CreateShortcut($lnkPath)
+    $shortcut.TargetPath = $powershellExe
+    $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$openWeb`""
+    $shortcut.WorkingDirectory = $serverDir
+    if (Test-Path -LiteralPath $iconPath) {
+        $shortcut.IconLocation = "$iconPath,0"
+    }
+    $shortcut.Description = $Description
+    # 7 = 最小化：脚本隐藏窗口运行，打开浏览器后即退出
+    $shortcut.WindowStyle = 7
+    $shortcut.Save()
+    Write-Output "已创建网页端快捷方式：$lnkPath"
+    Write-Output "  目标：$openWeb"
+    Write-Output "  行为：已启动则直接开网页；未启动会后台拉起后打开 http://127.0.0.1:8090/app/"
+    exit 0
+}
+
+if (-not $ExePath) {
+    $ExePath = Join-Path $serverDir "dist_exe\FlowMask.exe"
+}
+if (-not (Test-Path -LiteralPath $ExePath)) {
+    throw "找不到 exe：$ExePath（先运行 scripts\build_exe.ps1 打包；只想打开网页端可用 -Mode web）"
+}
+$exeFull = (Resolve-Path -LiteralPath $ExePath).Path
+$exeDir = Split-Path $exeFull -Parent
 
 if ($Mode -eq "stop") {
     if (-not $Name) { $Name = "FlowMask 停止" }

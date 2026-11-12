@@ -1,392 +1,389 @@
 <script setup>
+import { safeError } from "../workspace";
+import PageHeader from "../components/PageHeader.vue";
 import { computed, onMounted, ref } from "vue";
-import { ElMessage, ElMessageBox } from "element-plus";
 import { api } from "../api";
 
-// ---------- 1. 场景与默认值 ----------
-// 默认场景/策略/识别模式/级别，存 localStorage，内容检测页与隐私导出读这里作为初始值
-const DEFAULTS_KEY = "flowmask-defaults";
-const defaults = ref({
-  strategy: "partial",
-  minLevel: "SAFE",
-  enableL2: false,
-  enableL3: false,
-  enableNer: false,
-});
-
-const STRATEGIES = [
-  { label: "partial 部分遮掩", value: "partial" },
-  { label: "block 全屏蔽", value: "block" },
-  { label: "hash 哈希替换", value: "hash" },
-  { label: "generalize 数值泛化", value: "generalize" },
-  { label: "pseudonym 假名替换", value: "pseudonym" },
-  { label: "encrypt AES-GCM", value: "encrypt" },
-];
-const LEVELS = [
-  { label: "SAFE 全部", value: "SAFE" },
-  { label: "L1 低危及以上", value: "L1" },
-  { label: "L2 中危及以上", value: "L2" },
-  { label: "L3 高危", value: "L3" },
-];
-
-function loadDefaults() {
-  try {
-    const raw = window.localStorage.getItem(DEFAULTS_KEY);
-    if (raw) defaults.value = { ...defaults.value, ...JSON.parse(raw) };
-  } catch { /* ignore */ }
-}
-function saveDefaults() {
-  try {
-    window.localStorage.setItem(DEFAULTS_KEY, JSON.stringify(defaults.value));
-    ElMessage.success("默认值已保存");
-  } catch {
-    ElMessage.error("写入本地存储失败（可能处于隐私模式）");
-  }
-}
-
-// ---------- 2. 自定义场景（localStorage） ----------
-const CUSTOM_KEY = "flowmask-custom-scenarios";
-const customScenarios = ref([]);
-const scenarioDialog = ref(false);
-const scenarioForm = ref({
-  name: "",
-  strategy: "partial",
-  minLevel: "L2",
-  enableL2: true,
-  enableL3: false,
-  enableNer: false,
-  audit: true,
-});
-
-function loadCustomScenarios() {
-  try {
-    const raw = window.localStorage.getItem(CUSTOM_KEY);
-    if (raw) customScenarios.value = JSON.parse(raw);
-  } catch { /* ignore */ }
-}
-function persistCustomScenarios() {
-  try {
-    window.localStorage.setItem(CUSTOM_KEY, JSON.stringify(customScenarios.value));
-  } catch {
-    ElMessage.error("写入本地存储失败");
-  }
-}
-function addCustomScenario() {
-  const name = (scenarioForm.value.name || "").trim();
-  if (!name) {
-    ElMessage.warning("请填写场景名称");
-    return;
-  }
-  const id = `custom-${Date.now()}`;
-  customScenarios.value.push({
-    id,
-    name,
-    strategy: scenarioForm.value.strategy,
-    minLevel: scenarioForm.value.minLevel,
-    enableL2: scenarioForm.value.enableL2,
-    enableL3: scenarioForm.value.enableL3,
-    enableNer: scenarioForm.value.enableNer,
-    audit: scenarioForm.value.audit,
-  });
-  persistCustomScenarios();
-  scenarioDialog.value = false;
-  scenarioForm.value = {
-    name: "",
-    strategy: "partial",
-    minLevel: "L2",
-    enableL2: true,
-    enableL3: false,
-    enableNer: false,
-    audit: true,
-  };
-  ElMessage.success("自定义场景已保存");
-}
-function removeCustomScenario(id) {
-  ElMessageBox.confirm("删除该自定义场景？", "确认", { type: "warning" })
-    .then(() => {
-      customScenarios.value = customScenarios.value.filter((s) => s.id !== id);
-      persistCustomScenarios();
-      ElMessage.success("已删除");
-    })
-    .catch(() => {});
-}
-
-// ---------- 3. 隐私增强（保留） ----------
-// ε（差分隐私噪声强度）/ l（l-多样性）滑块，TasksView 隐私导出读这里作为初始值
-const PRIVACY_KEY = "flowmask-privacy";
-const privacy = ref({ epsilon: 1.0, l: 2 });
-
-function loadPrivacy() {
-  try {
-    const raw = window.localStorage.getItem(PRIVACY_KEY);
-    if (raw) privacy.value = { ...privacy.value, ...JSON.parse(raw) };
-  } catch { /* ignore */ }
-}
-function savePrivacy() {
-  try {
-    window.localStorage.setItem(PRIVACY_KEY, JSON.stringify(privacy.value));
-    ElMessage.success("隐私参数已保存");
-  } catch {
-    ElMessage.error("写入本地存储失败");
-  }
-}
-
-// ---------- 4. 模型与降级 ----------
-// 读 api.health() 展示 L2/L3/NER/OCR/助手状态
+// ---------------------------------------------------------------------------
+// 模型与助手：进入页面就查一次，之后靠「刷新状态」手动刷新（模型可能后启动）
+// ---------------------------------------------------------------------------
+const section = ref("capabilities");
 const health = ref(null);
+const models = ref(null);
 const healthLoading = ref(false);
-const ollamaDialog = ref(false);
-const ollamaForm = ref({
-  mode: "off",
-  endpoint: "http://127.0.0.1:11434/v1/chat/completions",
-  model: "qwen2.5:1.5b",
-});
-const OLLAMA_KEY = "flowmask-assistant-config";
+const healthError = ref("");
 
-function loadOllamaConfig() {
-  try {
-    const raw = window.localStorage.getItem(OLLAMA_KEY);
-    if (!raw) return;
-    const saved = JSON.parse(raw);
-    ollamaForm.value = {
-      mode: saved.mode === "ollama" ? "ollama" : "off",
-      endpoint: saved.endpoint || ollamaForm.value.endpoint,
-      model: saved.model || ollamaForm.value.model,
-    };
-  } catch { /* ignore */ }
-}
-function saveOllamaConfig() {
-  try {
-    window.localStorage.setItem(OLLAMA_KEY, JSON.stringify(ollamaForm.value));
-    ElMessage.warning("前端配置已保存。修改需在服务端 .env 配置 FLOWMASK_ASSISTANT_* 后重启生效");
-    ollamaDialog.value = false;
-  } catch {
-    ElMessage.error("写入本地存储失败");
+const MODE_LABELS = {
+  rules: "规则模式（本地规则，不需要模型）",
+  ollama: "本地 Ollama",
+};
+const modeLabel = computed(() => {
+  if (!health.value) return "";
+  return MODE_LABELS[health.value.mode] || health.value.mode || "未知";
+});
+const modelList = computed(() => {
+  const list = models.value ? models.value.models : null;
+  return Array.isArray(list) ? list : [];
+});
+const modelHint = computed(() => {
+  if (!health.value) return "";
+  if (health.value.mode === "rules") {
+    return "规则模式：方案推荐与风险研判都由本地规则生成，不需要下载模型。";
   }
-}
+  if (!modelList.value.length) {
+    return "未发现本机模型：先在服务端执行 ollama pull <模型名>，或把 FLOWMASK_ASSISTANT_MODE 改回 rules。";
+  }
+  return `本机可用模型 ${modelList.value.length} 个：${modelList.value.join("、")}`;
+});
+const healthTagType = computed(() => {
+  if (!health.value) return "info";
+  return health.value.available ? "success" : "warning";
+});
 
 async function loadHealth() {
   healthLoading.value = true;
+  healthError.value = "";
   try {
-    health.value = await api.health();
+    // 两个接口各查各的：models 失败不应让健康状态一起空白
+    const results = await Promise.allSettled([
+      api.fetchAssistantHealth(),
+      api.fetchAssistantModels(),
+    ]);
+    const [healthResult, modelsResult] = results;
+    if (healthResult.status === "fulfilled") {
+      health.value = healthResult.value;
+    } else {
+      throw healthResult.reason;
+    }
+    models.value =
+      modelsResult.status === "fulfilled" ? modelsResult.value : null;
+    if (modelsResult.status === "rejected") {
+      healthError.value = `模型列表读取失败（不影响状态展示）：${modelsResult.reason}`;
+    }
   } catch (err) {
-    ElMessage.error(`加载健康检查失败：${err}`);
+    health.value = null;
+    healthError.value = `助手状态读取失败：${safeError(err)}`;
   } finally {
     healthLoading.value = false;
   }
 }
 
-function healthBadge(value) {
-  return value ? { type: "success", text: "已启用" } : { type: "info", text: "未启用" };
-}
+// ---------------------------------------------------------------------------
+// 脱敏策略：下拉与说明由服务端统一给，这里只做只读展示
+// ---------------------------------------------------------------------------
+const strategies = ref([]);
+const strategiesLoading = ref(false);
+const strategiesError = ref("");
+const defaultStrategy = ref("partial");
 
-const assistantModeLabel = computed(() => {
-  const m = ollamaForm.value.mode;
-  if (m === "ollama") return "本机 Ollama";
-  return "规则引擎（不联网）";
-});
-
-// ---------- 5. 关于 ----------
-const about = {
-  version: "FlowMask 服务端 0.1.0 / 客户端 0.14.0",
+const strategyLabel = (key) => {
+  const found = strategies.value.find((item) => item.key === key);
+  return found ? found.label : key;
 };
 
-onMounted(() => {
-  loadDefaults();
-  loadCustomScenarios();
-  loadPrivacy();
-  loadOllamaConfig();
-  loadHealth();
+async function loadStrategies() {
+  strategiesLoading.value = true;
+  strategiesError.value = "";
+  try {
+    const body = await api.fetchMaskStrategies();
+    strategies.value = body.strategies || [];
+    defaultStrategy.value = body.default || "partial";
+  } catch (err) {
+    strategies.value = [];
+    strategiesError.value = `脱敏策略加载失败：${safeError(err)}`;
+  } finally {
+    strategiesLoading.value = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 场景模板：选中一行就展开它的数据保留说明
+// ---------------------------------------------------------------------------
+const scenarios = ref([]);
+const scenariosLoading = ref(false);
+const scenariosError = ref("");
+const selectedScenario = ref("");
+
+const activeScenario = computed(
+  () =>
+    scenarios.value.find((item) => item.key === selectedScenario.value) || null,
+);
+
+function selectScenario(row) {
+  selectedScenario.value = selectedScenario.value === row.key ? "" : row.key;
+}
+
+async function loadScenarios() {
+  scenariosLoading.value = true;
+  scenariosError.value = "";
+  try {
+    const body = await api.fetchScenarios();
+    scenarios.value = body.scenarios || [];
+  } catch (err) {
+    scenarios.value = [];
+    scenariosError.value = `场景模板加载失败：${safeError(err)}`;
+  } finally {
+    scenariosLoading.value = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 常见问题：静态文案，写清楚能力边界与配置方式，不做夸张承诺
+// ---------------------------------------------------------------------------
+const FAQ = [
+  {
+    q: "数据会上传到公网吗？",
+    a: "不会。识别、分级、脱敏、审计全部在本机服务进程内完成，默认不依赖任何外部网络服务。只有主动开启 L3 大模型或把助手切到 ollama 模式时，才会连接本机地址（默认 127.0.0.1:11434）上的 Ollama；把 FLOWMASK_ASSISTANT_MODE 保持 rules、L2/L3 保持关闭时，整条链路完全不联网。浏览器访问的也是本机服务。",
+  },
+  {
+    q: "支持哪些输入格式？",
+    a: "文本 / Markdown / 日志（txt、md、log）、JSON、CSV / TSV、SQL、Word（docx）、Excel（xlsx）。docx 与 xlsx 都由服务端零依赖自研解析（zip + XML），不额外需要 python-docx / openpyxl；xlsx 每张工作表只检测表头以下的数据行，表头只作为列名提示。PDF 依赖可选库 pdfplumber / pypdf，缺依赖时会返回明确的安装提示而不是假装解析成功；扫描件 PDF 没有文本层，需要先 OCR。图片 OCR 见下一条。",
+  },
+  {
+    q: "加密内容如何还原？",
+    a: "导出时选择「加密」策略，被替换的敏感值会写成 enc: 开头的密文片段。把这份脱敏文本重新贴回检测页，点结果区的「还原加密内容」，服务端会用本机密钥把它还原成原文。密钥来自数据目录下的 export_secret.key（可用 FLOWMASK_EXPORT_SECRET 指定）；换机器或换密钥后旧密文无法还原。还原只在本机进行，请不要把密文或还原结果外发。",
+  },
+  {
+    q: "图片 OCR 怎么开？",
+    a: "OCR 是可选能力，默认关闭：先在服务端安装可选 OCR 依赖（requirements-ocr.txt），再设置 FLOWMASK_OCR_ENABLED=1 并重启服务。未启用时上传图片会返回「需要 OCR 依赖」的提示，不会静默失败。启用后图片先被识别成文字，再走同一套 L1/L2/L3 分级与脱敏流程。",
+  },
+  {
+    q: "审计链如何验证？",
+    a: "在「任务与审计链」页签点「刷新并校验」（对应 GET /api/v1/audit/verify），服务端会按 HMAC-SHA256 逐条重算 prev_hash、signature 与 entry_hash，返回是否通过、共多少条、校验了多少条、断点位置。也可以直接调接口或写脚本复核。签名密钥默认首次启动时自动生成并落在数据目录的 audit_secret.key（可用 FLOWMASK_AUDIT_SECRET 指定），换密钥后旧记录将无法验签。",
+  },
+  {
+    q: "是否会保留原文？",
+    a: "不会落原文。任务与检测结果只保存脱敏副本、原文的 SHA-256 哈希和审计链条目；即时检测接口不落库。流量导入（pcap）同样只存脱敏后的正文。导出的脱敏文件是本次请求在内存里重建后直接返回的，不写入数据库。",
+  },
+  {
+    q: "性能与并发怎么样？",
+    a: "单机 SQLite + 进程内识别，适合演示、单用户或小团队使用。L1 规则识别是毫秒级；L2 / L3 受模型与超时限制（默认 L2 0.5s、L3 5s），超时会自动降级并在结果里标记 degraded。并发能力取决于本机 CPU 与内存，不建议把 SQLite 单实例当多用户高并发服务使用。上传大小受 FLOWMASK_MAX_UPLOAD_MB 限制（默认 20MB）。",
+  },
+  {
+    q: "依赖哪些环境变量？",
+    a: "全部可选，不设置就按本机演示的默认值运行。常用：FLOWMASK_API_TOKEN（接口鉴权，空表示不鉴权）、FLOWMASK_DATA_DIR / FLOWMASK_DB_PATH、FLOWMASK_ENABLE_L2 / FLOWMASK_ENABLE_L3、FLOWMASK_ENABLE_NER、FLOWMASK_OCR_ENABLED、FLOWMASK_ASSISTANT_MODE / FLOWMASK_ASSISTANT_ENDPOINT / FLOWMASK_ASSISTANT_MODEL、FLOWMASK_AUDIT_SECRET、FLOWMASK_EXPORT_SECRET、FLOWMASK_MAX_UPLOAD_MB。",
+  },
+  {
+    q: "「模型与助手」里的助手模式和 L3 大模型是一回事吗？",
+    a: "不是。L3 大模型用于检测阶段的复核（对可疑片段再判一次），AI 助手用于推荐脱敏方案和统计看板的风险研判。两者都可以指向本机 Ollama，但配置项、开关和超时相互独立；助手默认 rules 模式，不下载模型也能用。",
+  },
+];
+
+onMounted(async () => {
+  await Promise.all([loadHealth(), loadStrategies(), loadScenarios()]);
 });
 </script>
 
 <template>
-  <div class="panel">
-    <div class="panel-title">场景与默认值</div>
-    <div class="settings-row">
-      <span class="settings-label">默认脱敏策略</span>
-      <el-select v-model="defaults.strategy" style="width: 220px">
-        <el-option v-for="s in STRATEGIES" :key="s.value" :label="s.label" :value="s.value" />
-      </el-select>
-    </div>
-    <div class="settings-row">
-      <span class="settings-label">默认最小返回级别</span>
-      <el-select v-model="defaults.minLevel" style="width: 220px">
-        <el-option v-for="l in LEVELS" :key="l.value" :label="l.label" :value="l.value" />
-      </el-select>
-    </div>
-    <div class="settings-row">
-      <span class="settings-label">识别模式</span>
-      <el-checkbox v-model="defaults.enableL2">L2 语义</el-checkbox>
-      <el-checkbox v-model="defaults.enableL3">L3 大模型</el-checkbox>
-      <el-checkbox v-model="defaults.enableNer">自由文本 NER</el-checkbox>
+  <PageHeader
+    title="设置与策略"
+    description="了解本机能力、脱敏策略和场景模板，明确数据保留边界。"
+    index="PREFERENCES"
+  />
+  <el-tabs v-model="section"
+    ><el-tab-pane name="capabilities" label="本机能力" /><el-tab-pane
+      name="policies"
+      label="策略与场景库" /><el-tab-pane name="help" label="使用与安全说明"
+  /></el-tabs>
+  <div v-show="section === 'capabilities'" class="panel">
+    <div class="panel-title">
+      模型与助手
+      <span class="hint">只读状态：模型与助手都由服务端环境变量配置</span>
     </div>
     <div class="toolbar">
-      <el-button type="primary" @click="saveDefaults">保存默认值</el-button>
+      <el-button size="small" :loading="healthLoading" @click="loadHealth"
+        >刷新状态</el-button
+      >
+      <el-tag v-if="health" size="small" :type="healthTagType">
+        {{ health.available ? "可用" : "当前不可用" }}
+      </el-tag>
+    </div>
+    <el-alert
+      v-if="healthError"
+      type="error"
+      :closable="false"
+      show-icon
+      style="margin-top: 12px"
+    >
+      {{ healthError }}
+    </el-alert>
+    <div v-loading="healthLoading" style="margin-top: 12px">
+      <template v-if="health">
+        <dl class="kv">
+          <dt>助手开关</dt>
+          <dd>
+            {{
+              health.enabled
+                ? "已启用"
+                : "已停用（FLOWMASK_ASSISTANT_ENABLED=0）"
+            }}
+          </dd>
+          <dt>模式</dt>
+          <dd>{{ modeLabel }}</dd>
+          <dt>状态说明</dt>
+          <dd>{{ health.note || "—" }}</dd>
+          <dt>当前模型</dt>
+          <dd>{{ health.model || "未配置" }}</dd>
+          <dt>模型服务地址</dt>
+          <dd>{{ (models && models.endpoint) || "—" }}</dd>
+          <dt>本机模型</dt>
+          <dd>{{ modelList.length ? modelList.join("、") : "未发现" }}</dd>
+          <dt>模型接口说明</dt>
+          <dd>{{ (models && models.note) || "—" }}</dd>
+        </dl>
+        <div class="hint-line">{{ modelHint }}</div>
+      </template>
+      <div v-else class="empty">还没有取到助手状态</div>
+    </div>
+    <div class="hint-line">
+      配置方式（服务端环境变量，前端只读）：<code>FLOWMASK_ASSISTANT_MODE</code>（rules
+      / ollama）、
+      <code>FLOWMASK_ASSISTANT_ENDPOINT</code>（Ollama 地址，默认
+      http://127.0.0.1:11434/api/generate）、
+      <code>FLOWMASK_ASSISTANT_MODEL</code>（模型名，如
+      qwen2.5:1.5b）。改完需要重启服务。
+    </div>
+  </div>
+
+  <div v-show="section === 'policies'" class="panel">
+    <div class="panel-title">
+      脱敏策略与场景
+      <span class="hint"
+        >策略说明与场景模板都来自服务端，选场景可按推荐配置一键套用</span
+      >
+    </div>
+    <div class="toolbar">
+      <el-button
+        size="small"
+        :loading="strategiesLoading"
+        @click="loadStrategies"
+        >刷新策略</el-button
+      >
+      <el-button size="small" :loading="scenariosLoading" @click="loadScenarios"
+        >刷新场景</el-button
+      >
+      <span class="hint">默认策略：{{ strategyLabel(defaultStrategy) }}</span>
     </div>
 
-    <div class="settings-subtitle">自定义场景</div>
-    <el-table :data="customScenarios" stripe style="margin-top: 8px" empty-text="尚未添加自定义场景">
-      <el-table-column prop="name" label="名称" />
-      <el-table-column prop="strategy" label="策略" width="110" />
-      <el-table-column prop="minLevel" label="级别" width="90" />
-      <el-table-column label="L2/L3/NER" width="120">
+    <el-alert
+      v-if="strategiesError"
+      type="error"
+      :closable="false"
+      show-icon
+      style="margin-top: 12px"
+    >
+      {{ strategiesError }}
+    </el-alert>
+    <el-table
+      v-if="strategies.length"
+      :data="strategies"
+      stripe
+      style="margin-top: 12px"
+      :row-style="
+        ({ row }) => (row.key === defaultStrategy ? { fontWeight: 600 } : {})
+      "
+    >
+      <el-table-column label="策略" width="150">
         <template #default="scope">
-          {{ scope.row.enableL2 ? "L2 " : "" }}{{ scope.row.enableL3 ? "L3 " : "" }}{{ scope.row.enableNer ? "NER" : "" }}
+          {{ scope.row.label }}
+          <div class="hint">{{ scope.row.key }}</div>
         </template>
       </el-table-column>
-      <el-table-column label="审计" width="70">
+      <el-table-column prop="description" label="说明" show-overflow-tooltip />
+      <el-table-column label="可逆性" width="100">
         <template #default="scope">
-          <el-tag :type="scope.row.audit ? 'success' : 'info'" size="small">
-            {{ scope.row.audit ? "建议" : "不必要" }}
+          <el-tag
+            :type="scope.row.reversible ? 'warning' : 'info'"
+            size="small"
+          >
+            {{ scope.row.reversible ? "可还原" : "不可逆" }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="90">
+      <el-table-column label="示例（虚构）" width="300">
         <template #default="scope">
-          <el-button size="small" type="danger" @click="removeCustomScenario(scope.row.id)">删除</el-button>
+          <div
+            v-for="(example, index) in (scope.row.examples || []).slice(0, 3)"
+            :key="index"
+            class="hint"
+          >
+            {{ example.raw }} → {{ example.masked }}
+          </div>
+          <span v-if="!(scope.row.examples || []).length" class="hint">—</span>
         </template>
       </el-table-column>
     </el-table>
-    <div class="toolbar" style="margin-top: 8px">
-      <el-button @click="scenarioDialog = true">新增自定义场景</el-button>
+    <div v-else-if="!strategiesLoading && !strategiesError" class="empty">
+      没有可展示的策略
+    </div>
+
+    <el-alert
+      v-if="scenariosError"
+      type="error"
+      :closable="false"
+      show-icon
+      style="margin-top: 12px"
+    >
+      {{ scenariosError }}
+    </el-alert>
+    <el-table
+      v-if="scenarios.length"
+      :data="scenarios"
+      stripe
+      highlight-current-row
+      style="margin-top: 12px"
+      @row-click="selectScenario"
+    >
+      <el-table-column label="场景" width="170">
+        <template #default="scope">
+          {{ scope.row.label }}
+          <div class="hint">{{ scope.row.key }}</div>
+        </template>
+      </el-table-column>
+      <el-table-column prop="description" label="用途" show-overflow-tooltip />
+      <el-table-column label="推荐策略" width="130">
+        <template #default="scope">{{
+          strategyLabel(scope.row.strategy)
+        }}</template>
+      </el-table-column>
+      <el-table-column label="级别" width="150">
+        <template #default="scope">
+          脱敏 {{ scope.row.mask_level }} · 最低 {{ scope.row.min_level }}
+        </template>
+      </el-table-column>
+      <el-table-column label="数据保留说明" show-overflow-tooltip>
+        <template #default="scope">{{ scope.row.retention || "—" }}</template>
+      </el-table-column>
+    </el-table>
+    <div v-else-if="!scenariosLoading && !scenariosError" class="empty">
+      没有可展示的场景模板
+    </div>
+    <el-alert
+      v-if="activeScenario"
+      type="info"
+      :closable="false"
+      show-icon
+      style="margin-top: 12px"
+    >
+      <b>{{ activeScenario.label }}</b> · 脱敏级别
+      {{ activeScenario.mask_level }} · 最低 {{ activeScenario.min_level }} ·
+      策略 {{ strategyLabel(activeScenario.strategy) }}<br />
+      {{ activeScenario.description }}<br />
+      数据保留：{{ activeScenario.retention || "无额外说明" }}
+    </el-alert>
+    <div v-if="scenarios.length" class="hint-line">
+      点表格行可展开/收起该场景的数据保留说明。
     </div>
   </div>
 
-  <div class="panel">
-    <div class="panel-title">隐私增强</div>
-    <div class="settings-row">
-      <span class="settings-label">差分隐私 ε（{{ privacy.epsilon.toFixed(2) }}）</span>
-      <el-slider v-model="privacy.epsilon" :min="0.1" :max="5" :step="0.1" style="flex: 1; max-width: 320px" />
-      <span class="settings-hint">数值越大噪声越强，保护更彻底但可用性下降</span>
+  <div v-show="section === 'help'" class="panel">
+    <div class="panel-title">
+      常见问题
+      <span class="hint">能力边界与配置方式，按实际情况说明</span>
     </div>
-    <div class="settings-row">
-      <span class="settings-label">l-多样性（{{ privacy.l }}）</span>
-      <el-slider v-model="privacy.l" :min="1" :max="5" :step="1" style="flex: 1; max-width: 320px" />
-      <span class="settings-hint">等价类内至少有 l 个不同值，抵御同质攻击</span>
-    </div>
-    <div class="toolbar">
-      <el-button type="primary" @click="savePrivacy">保存隐私参数</el-button>
-    </div>
+    <details v-for="item in FAQ" :key="item.q" class="faq-item">
+      <summary>{{ item.q }}</summary>
+      <p>{{ item.a }}</p>
+    </details>
   </div>
-
-  <div class="panel">
-    <div class="panel-title">模型与降级</div>
-    <div class="toolbar">
-      <el-button :loading="healthLoading" @click="loadHealth">刷新状态</el-button>
-      <el-button @click="ollamaDialog = true">配置 AI 助手连接</el-button>
-    </div>
-    <el-descriptions v-if="health" :column="2" border style="margin-top: 12px">
-      <el-descriptions-item label="L2 语义">
-        <el-tag :type="healthBadge(health.enable_l2).type" size="small">{{ healthBadge(health.enable_l2).text }}</el-tag>
-      </el-descriptions-item>
-      <el-descriptions-item label="L3 大模型">
-        <el-tag :type="healthBadge(health.enable_l3).type" size="small">{{ healthBadge(health.enable_l3).text }}</el-tag>
-      </el-descriptions-item>
-      <el-descriptions-item label="NER 实体识别">
-        <el-tag :type="healthBadge(health.ner).type" size="small">{{ healthBadge(health.ner).text }}</el-tag>
-      </el-descriptions-item>
-      <el-descriptions-item label="OCR 图片识别">
-        <el-tag :type="healthBadge(health.ocr).type" size="small">{{ healthBadge(health.ocr).text }}</el-tag>
-      </el-descriptions-item>
-      <el-descriptions-item label="AI 助手" :span="2">
-        {{ assistantModeLabel }}
-      </el-descriptions-item>
-    </el-descriptions>
-    <div v-else class="settings-hint" style="margin-top: 12px">点击「刷新状态」读取服务端配置。</div>
-  </div>
-
-  <div class="panel">
-    <div class="panel-title">关于</div>
-    <div class="settings-row"><span class="settings-label">版本</span>{{ about.version }}</div>
-  </div>
-
-  <!-- 自定义场景弹窗 -->
-  <el-dialog v-model="scenarioDialog" title="新增自定义场景" width="520px">
-    <el-form :model="scenarioForm" label-width="120px">
-      <el-form-item label="场景名称">
-        <el-input v-model="scenarioForm.name" placeholder="例如 外包交付-甲方A" />
-      </el-form-item>
-      <el-form-item label="脱敏策略">
-        <el-select v-model="scenarioForm.strategy" style="width: 100%">
-          <el-option v-for="s in STRATEGIES" :key="s.value" :label="s.label" :value="s.value" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="最小返回级别">
-        <el-select v-model="scenarioForm.minLevel" style="width: 100%">
-          <el-option v-for="l in LEVELS" :key="l.value" :label="l.label" :value="l.value" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="识别模式">
-        <el-checkbox v-model="scenarioForm.enableL2">L2 语义</el-checkbox>
-        <el-checkbox v-model="scenarioForm.enableL3">L3 大模型</el-checkbox>
-        <el-checkbox v-model="scenarioForm.enableNer">自由文本 NER</el-checkbox>
-      </el-form-item>
-      <el-form-item label="建议启用审计">
-        <el-switch v-model="scenarioForm.audit" />
-      </el-form-item>
-    </el-form>
-    <template #footer>
-      <el-button @click="scenarioDialog = false">取消</el-button>
-      <el-button type="primary" @click="addCustomScenario">保存场景</el-button>
-    </template>
-  </el-dialog>
-
-  <!-- AI 助手连接配置弹窗 -->
-  <el-dialog v-model="ollamaDialog" title="AI 助手连接（仅展示）" width="520px">
-    <el-form :model="ollamaForm" label-width="120px">
-      <el-form-item label="模式">
-        <el-radio-group v-model="ollamaForm.mode">
-          <el-radio value="off">规则引擎</el-radio>
-          <el-radio value="ollama">本机 Ollama</el-radio>
-        </el-radio-group>
-      </el-form-item>
-      <el-form-item label="Endpoint">
-        <el-input v-model="ollamaForm.endpoint" placeholder="http://127.0.0.1:11434/v1/chat/completions" />
-      </el-form-item>
-      <el-form-item label="模型名">
-        <el-input v-model="ollamaForm.model" placeholder="qwen2.5:1.5b" />
-      </el-form-item>
-    </el-form>
-    <div class="settings-hint" style="margin-top: 8px">
-      修改需在服务端 .env 配置 FLOWMASK_ASSISTANT_* 环境变量并重启服务后才生效；此处仅作展示。
-    </div>
-    <template #footer>
-      <el-button @click="ollamaDialog = false">取消</el-button>
-      <el-button type="primary" @click="saveOllamaConfig">保存配置</el-button>
-    </template>
-  </el-dialog>
 </template>
-
-<style scoped>
-.settings-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 8px 0;
-  flex-wrap: wrap;
-}
-.settings-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.settings-label {
-  font-weight: 600;
-  min-width: 120px;
-}
-.settings-hint {
-  color: var(--text-muted, #888);
-  font-size: 12px;
-}
-.settings-subtitle {
-  font-weight: 600;
-  margin-top: 16px;
-  margin-bottom: 4px;
-}
-.toolbar {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-</style>

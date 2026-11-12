@@ -1,0 +1,109 @@
+# -*- mode: python ; coding: utf-8 -*-
+"""PyInstaller 打包配置：把 FlowMask 主服务 + 正式前端打成一个 Windows 单文件 exe。
+
+用法（在 server/ 目录下）：
+    python -m PyInstaller flowmask.spec --noconfirm --distpath dist_exe --workpath build_exe
+
+产物：``server/dist_exe/FlowMask.exe``（双击启动，自动开一个应用窗口）。
+说明：
+- 打包进去的只有「主服务」：L1 规则 + 解析 + 任务/审计/API + 前端静态资源 + 示例抓包；
+- L1 三级敏感词表 ``app/identify/knowledge/*.yaml`` 是运行时读取的数据文件，必须显式列进
+  ``datas``：漏了不会报错，``load_knowledge()`` 只会静默返回空词表（打包版悄悄丢掉词表层）；
+- L2/L3/NER 的模型权重体积大（GB 级），**不打进 exe**，放 exe 同级的 ``l2_models/``、``models/`` 即可被识别；
+- torch/onnxruntime/transformers 不打包（exe 只跑主服务，模型服务用 python 单独起，见 README 第 3/4 章）。
+"""
+
+from PyInstaller.utils.hooks import collect_submodules
+
+# 只读资源：前端构建产物、自带单页控制台、示例抓包、评测集（体积都很小）
+datas = [
+    ("../web/dist", "web/dist"),
+    ("app/webui", "app/webui"),
+    # L1 敏感词表（keywords.py 用 Path(__file__).parent/"knowledge" 读取）
+    ("app/identify/knowledge", "app/identify/knowledge"),
+    # 图标资源：系统托盘用 assets/flowmask-128.png（desktop.py 通过 paths.resource_root() 读取）
+    ("assets", "assets"),
+    ("samples", "samples"),
+    ("eval", "eval"),
+]
+
+# app 内部模块动态导入较多（路由、解析器注册表），显式收集；uvicorn 的协议/循环实现靠 hiddenimports
+hiddenimports = collect_submodules("app") + [
+    "uvicorn.logging",
+    "uvicorn.loops.auto",
+    "uvicorn.loops.asyncio",
+    "uvicorn.protocols.http.auto",
+    "uvicorn.protocols.http.h11_impl",
+    "uvicorn.protocols.websockets.auto",
+    "uvicorn.lifespan.on",
+    "multipart",
+    "pdfplumber",
+]
+
+# 托盘是可选依赖（requirements-desktop.txt）：装了 pystray 才把它的 Windows 后端收进来，
+# 没装也能正常打包，只是 exe 里没有托盘（desktop.py 会优雅降级）。
+try:
+    import pystray  # noqa: F401
+
+    hiddenimports += ["pystray", "pystray._win32", "PIL.Image", "PIL.ImageDraw"]
+except Exception:  # noqa: BLE001 - 构建机没装 pystray 时不影响主功能
+    pass
+
+# 明确排除重依赖：它们只被 L2/L3/NER/训练侧使用，主服务运行时不 import
+excludes = [
+    "tkinter",
+    "matplotlib",
+    "torch",
+    "transformers",
+    "modelscope",
+    "onnx",
+    "onnxruntime",
+    "onnxscript",
+    "sentencepiece",
+    "l2_service",
+    "l3_service",
+    "l2_training",
+]
+
+a = Analysis(
+    ["desktop.py"],
+    pathex=["."],
+    binaries=[],
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=excludes,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    name="FlowMask",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    # 解包临时目录固定到「当前工作目录下的 .flowmask-tmp」：
+    # 有的机器 %TEMP% 不可写（或被杀软/权限策略限制），onefile 会直接报
+    # Could not create temporary directory 而闪退；相对路径可让快捷方式
+    # 在工作目录=exe 目录时把它落在 exe 旁边，保证双击可用。
+    runtime_tmpdir=".flowmask-tmp",
+    console=False,  # 双击后不弹黑窗；日志写 %LOCALAPPDATA%\FlowMask\logs\desktop.log
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    # 图标与 Windows 版本资源：双击 exe / 任务栏 / 文件属性里显示的名称版本都来自这里
+    icon="assets/flowmask.ico",
+    version="assets/flowmask_version.txt",
+)

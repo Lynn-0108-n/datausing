@@ -15,6 +15,7 @@ from ..audit.chain import append_entry
 from ..core.config import Settings
 from ..identify import ENTITY_LABELS, Level
 from ..identify.pipeline import DetectOptions, sha256_text
+from ..security import SecurityError, protected_text
 from .deps import Operator, db_dep, operator_dep, pipeline_dep, settings_dep
 from .schemas import DynamicRenderIn, DynamicRenderOut, PolicyOut, SpanOut
 
@@ -37,7 +38,7 @@ POLICY_ROWS: tuple[dict[str, object], ...] = (
     {
         "level": "L1",
         "label": "低危",
-        "without_auth": "原文前加 [低危] 警示",
+        "without_auth": "保留风险警示，敏感值至少部分遮蔽",
         "with_auth": "展示原文",
     },
     {
@@ -56,6 +57,11 @@ def _parse_mask_level(value: str | None) -> Level | None:
         return Level.parse(value)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"mask_level 非法：{value!r}（可选 L3/L2/L1/SAFE）") from exc
+
+
+def _reveal_operators(settings: Settings) -> set[str]:
+    """解析原文查看白名单（逗号分隔）；空配置表示谁都不给原文。"""
+    return {item.strip() for item in settings.reveal_operators.split(",") if item.strip()}
 
 
 @router.get("/dynamic/policy", response_model=PolicyOut)
@@ -77,7 +83,10 @@ def dynamic_render(
         enable_l3=settings.enable_l3,
         mask_level=_parse_mask_level(payload.mask_level),
     )
-    finding = pipeline.analyze_text(payload.text, options)
+    try:
+        finding = pipeline.analyze_text(payload.text, options)
+    except Exception:
+        raise SecurityError('DETECTION_FAILED', '检测失败，未返回原文', 503) from None
 
     if finding is None:
         level = Level.SAFE
@@ -88,14 +97,18 @@ def dynamic_render(
         confidence_vector: list[dict[str, object]] = []
     else:
         level = finding.level
-        masked = finding.masked
+        masked = protected_text(payload.text, finding, options.mask_level)
         spans = [SpanOut(**dict(span)) for span in finding.spans]
         types = list(finding.types)
         model_chain = finding.model_chain
         confidence_vector = list(finding.confidence_vector)
 
-    shown = payload.text if payload.authorized else masked
-    policy = "full_access" if payload.authorized else "masked"
+    # 授权由服务端判定：客户端自报的 authorized 只表示「想不想要原文」，
+    # 真正放行还要看操作人是否在 FLOWMASK_REVEAL_OPERATORS 白名单里。
+    # 否则任何人加一个 authorized=true 就能绕过脱敏（旧实现的缺陷）。
+    authorized = bool(payload.authorized and operator.operator_id in _reveal_operators(settings))
+    shown = payload.text if authorized else masked
+    policy = "full_access" if authorized else "masked"
 
     # 每次渲染都进审计链：能看原文这件事本身也要可追溯（task_id=0 表示非任务型访问）
     append_entry(
@@ -110,13 +123,14 @@ def dynamic_render(
         user_id=operator.user_id,
     )
 
-    note = (
-        f"已按授权展示原文（操作人 {operator.operator_id}）；本次访问已写入审计链。"
-        if payload.authorized
-        else "未授权：返回脱敏副本。需要原文时开启「授权查看原文」，并留下审计记录。"
-    )
+    if authorized:
+        note = f"已按授权展示原文（操作人 {operator.operator_id}）；本次访问已写入审计链。"
+    else:
+        note = "未授权：返回脱敏副本。需要原文时开启「授权查看原文」，并留下审计记录。"
+        if payload.authorized:
+            note += " 服务端授权不足（需在 FLOWMASK_REVEAL_OPERATORS 白名单中）。"
     return DynamicRenderOut(
-        authorized=payload.authorized,
+        authorized=authorized,
         policy=policy,
         level=level.value,
         level_label=level.label,

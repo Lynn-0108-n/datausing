@@ -19,6 +19,7 @@ import (
 	"github.com/wukiQAQ/datausing/internal/alert"
 	"github.com/wukiQAQ/datausing/internal/api"
 	"github.com/wukiQAQ/datausing/internal/app"
+	"github.com/wukiQAQ/datausing/internal/buildinfo"
 	"github.com/wukiQAQ/datausing/internal/capture"
 	"github.com/wukiQAQ/datausing/internal/config"
 	"github.com/wukiQAQ/datausing/internal/filter"
@@ -101,10 +102,25 @@ func main() {
 	a := app.New(cfg, src, table, agg, store)
 	a.Alerts = eng
 	a.Dumper = dumper
+	// 在线 DLP 检测（默认关闭）：开启后采集链路把载荷快照投给 worker 池，
+	// 命中且达到 min_level 才落 dlp_findings，原始正文不入库。
+	if cfg.DLP.Enabled {
+		if err := a.EnableDLP(store); err != nil {
+			log.Fatalf("[dlp] 在线检测启用失败: %v", err)
+		}
+		defer a.CloseDLP()
+		// features 里加 dlp.online：客户端据此显示"在线检测中"而不是"仅查询历史结果"。
+		buildinfo.Enable("dlp.online")
+		log.Printf("[dlp] 在线检测已启用（workers=%d queue=%d max_payload=%d min_level=%s）",
+			cfg.DLP.Workers, cfg.DLP.QueueSize, cfg.DLP.MaxPayload, cfg.DLP.MinLevel)
+	}
 	srv := api.New(cfg, agg, table, store, webui.FS)
 	// 查询窗口跟随"数据时间"：离线回放的历史 pcap 数据时间远早于墙钟，
 	// 不注入的话 /topn 与 /traffic/history 会恒为空（见 api.SetDataClock）。
 	srv.SetDataClock(a.DataNow)
+	if cfg.DLP.Enabled {
+		srv.SetDLPStats(a.DLPSnapshot)
+	}
 	srv.SetAlerts(eng)
 	srv.SetDumper(dumper)
 	// 白名单运维动作：命令预览 + 参数校验 + 审计

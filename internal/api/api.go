@@ -101,7 +101,9 @@ type Server struct {
 	pluginsEnabled bool
 	// DLP 检测结果存储：nil 表示当前后端不支持（接口返回 503）。
 	findings storage.FindingStore
-	started  time.Time
+	// dlpStatsFn 提供在线检测计数：已分析帧、落库命中、队列满丢弃；nil 表示未启用。
+	dlpStatsFn func() (frames, hits, dropped uint64)
+	started    time.Time
 	ui       fs.FS
 	// nowFn 提供查询窗口使用的"数据时间"基准，nil 表示用墙钟。
 	// 离线回放时由 cmd/netmon 注入 app.DataNow，详见 SetDataClock。
@@ -132,6 +134,11 @@ func New(cfg *config.Config, agg *aggregator.Agg, table *flow.Table, store stora
 // 整体落在窗口之外——/traffic/history 与 /topn 返回空结果，而数据其实已经落盘。
 // 不注入时一律用墙钟，行为与历史版本完全一致。
 func (s *Server) SetDataClock(f func() time.Time) { s.nowFn = f }
+
+// SetDLPStats 注入在线检测计数源（app.DLPSnapshot）。未启用时不要调用，
+// 这样 statsMap 里的 dlp_online 才是 false。
+func (s *Server) SetDLPStats(f func() (frames, hits, dropped uint64)) { s.dlpStatsFn = f }
+
 
 // now 返回查询窗口应使用的时间基准（UTC）：注入了数据时钟且其值非零时用它，
 // 否则退回墙钟。
@@ -252,6 +259,10 @@ func (s *Server) statsMap() map[string]any {
 		rate = float64(drop) / float64(recv+drop)
 	}
 	last := s.agg.Last()
+	var frames, hits, dropped uint64
+	if s.dlpStatsFn != nil {
+		frames, hits, dropped = s.dlpStatsFn()
+	}
 	m := map[string]any{
 		// ts 是"当前数据时间"（见 Server.now）：离线回放时是最后一个报文的数据时间，
 		// 在线模式与墙钟一致；客户端据此区分"数据本身的时间"与服务器时间。
@@ -273,6 +284,11 @@ func (s *Server) statsMap() map[string]any {
 		"features":     buildinfo.Features,
 		// dlp 表示当前存储后端支持检测结果查询（前端据此决定是否显示 DLP 面板）
 		"dlp": s.findings != nil,
+		// dlp_online 表示采集链路已启用在线检测；三个计数便于发现"队列满丢帧"。
+		"dlp_online":  s.dlpStatsFn != nil,
+		"dlp_frames":  frames,
+		"dlp_hits":    hits,
+		"dlp_dropped": dropped,
 	}
 	// 采集过滤：把表达式与已过滤帧数一并上报（仅在启用过滤时出现）
 	if s.filter != "" {

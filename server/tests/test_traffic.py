@@ -9,8 +9,11 @@ from __future__ import annotations
 import struct
 import time
 
+import pytest
+
 from app.api.schemas import TrafficFormatsOut, TrafficImportOut
 from app.traffic import (
+    PcapError,
     build_document,
     collect_sessions,
     detect_format,
@@ -215,7 +218,7 @@ def test_traffic_import_creates_task_with_findings(client) -> None:
     assert "L3" in levels  # JSON 里的身份证/手机号直达高危
     joined = " ".join(item["masked"] for item in findings)
     assert ID_CARD not in joined and PHONE not in joined
-    assert "身份证号" in joined or "110105********002X" in joined or "手机号" in joined or "姓名" in joined
+    assert "已屏蔽" in joined
     # 五元组信息保留在 path 里，便于前端展示"哪条流"
     assert any("51001" in item["path"] for item in findings)
 
@@ -255,3 +258,48 @@ def test_traffic_sample_pcap_is_importable(client) -> None:
     body = imported.json()
     assert body["sessions"] == 3
     assert body["segments"] == 3
+
+
+def test_traffic_import_rejects_zero_length_pcapng(client) -> None:
+    """导入接口遇到零长 SHB 必须快速报错，不能挂死请求线程。"""
+    bogus = b"\x0a\x0d\x0d\x0a" + struct.pack("<I", 0) + struct.pack("<I", 0x1A2B3C4D)
+    response = client.post(
+        "/api/v1/traffic/import",
+        files={"pcap": ("bad.pcapng", bogus, "application/octet-stream")},
+    )
+    assert response.status_code == 415
+    assert "pcapng" in response.json()["detail"]
+
+
+def _pcapng_block(block_type: int, body: bytes) -> bytes:
+    """拼一个 pcapng 块：类型 + 总长 + 正文 + 尾部总长（小端）。"""
+    total = 12 + len(body)
+    return struct.pack("<II", block_type, total) + body + struct.pack("<I", total)
+
+
+def test_pcapng_zero_length_section_header_is_rejected() -> None:
+    """SHB 长度字段为 0 时必须报错：否则 offset 原地打转，parser 死循环。"""
+    bogus = b"\x0a\x0d\x0d\x0a" + struct.pack("<I", 0) + struct.pack("<I", 0x1A2B3C4D)
+    with pytest.raises(PcapError):
+        list(iter_packets(bogus))
+
+
+def test_pcapng_truncated_section_header_is_rejected() -> None:
+    """SHB 声明的总长超过文件实际长度时，按「文件不完整」报错而不是静默跳过。"""
+    # 声明 28 字节但只给 12 字节
+    bogus = b"\x0a\x0d\x0d\x0a" + struct.pack("<I", 28) + struct.pack("<I", 0x1A2B3C4D)
+    with pytest.raises(PcapError):
+        list(iter_packets(bogus))
+
+
+def test_pcapng_valid_file_still_parses() -> None:
+    """合法的 SHB + IDB + EPB 仍能解析出报文（校验不能误伤正常文件）。"""
+    shb = _pcapng_block(0x0A0D0D0A, struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1))
+    idb = _pcapng_block(0x00000001, struct.pack("<HHI", 1, 0, 65535))
+    frame = b"abcd"
+    epb = _pcapng_block(0x00000006, struct.pack("<IIIII", 0, 0, 1_500_000, len(frame), len(frame)) + frame)
+    packets = list(iter_packets(shb + idb + epb))
+    assert len(packets) == 1
+    assert packets[0].frame == frame
+    assert packets[0].linktype == 1
+    assert abs(packets[0].ts - 1.5) < 1e-6

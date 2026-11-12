@@ -4,6 +4,7 @@
 
 .DESCRIPTION
     按依赖顺序拉起所需进程，写入 data/run/<name>.pid，最后等待 /api/v1/health 就绪并打印入口。
+    启动前会先做端口试绑预检，避免旧实例占用端口时健康检查误打到旧进程。
     默认只起主服务（L1 规则链路，不加载任何模型）；需要真模型时加开关。
 
 .EXAMPLE
@@ -105,6 +106,32 @@ function Wait-FlowMaskHealth {
         }
     }
     return $false
+}
+
+function Test-FlowMaskPortAvailable {
+    param([Parameter(Mandatory = $true)][int]$Port)
+    $listener = $null
+    try {
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+        $listener.Start()
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($listener) { try { $listener.Stop() } catch { } }
+    }
+}
+
+# ---------- 端口预检 ----------
+# 端口已被旧实例占用时，新 uvicorn 会启动失败，但健康检查会打到旧实例并误报「就绪」
+$portsToCheck = @(@{ Port = $Port; Name = '主服务' })
+if ($WithL2) { $portsToCheck += @{ Port = 8091; Name = 'L2' } }
+if ($WithL3) { $portsToCheck += @{ Port = 8092; Name = 'L3' } }
+foreach ($item in $portsToCheck) {
+    if (-not (Test-FlowMaskPortAvailable -Port $item.Port)) {
+        Write-Warning ("端口 {0}（{1}）已被占用：可能已有 FlowMask 实例在运行；先执行 .\scripts\stop_local.ps1，或用 -Port 指定其他端口" -f $item.Port, $item.Name)
+        exit 1
+    }
 }
 
 # ---------- L2 语义模型服务 ----------

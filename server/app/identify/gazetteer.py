@@ -11,7 +11,7 @@
 
 - 地名命中必须满足「后缀」或「方位词」之一，避免把普通词里的字片段当地名：
   后缀 = 省/市/区/县/路/街/镇/村/号/自治区/特别行政区；方位词 = 在/到/去/往/从/来自/位于/住在/
-  回到/迁往/定居/发往/寄往；市/省后的区县段一并并入命中区间（深圳市南山区 → 深圳市南山区）；
+  回到/迁往/定居/发往/寄往；
 - 类别固定为 ``address``、级别只到 L1（权重/置信度与 ``address_kv`` 同量级，不抬级别）；
 - 与已有命中重叠时由 ``dedupe_overlaps`` 保留更精确的那条（字段名规则优先）。
 """
@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -130,21 +131,8 @@ _DIRECTION = (
 )
 
 _PLACE_ALT = "|".join(_PLACES)
-_SUFFIX_RE = re.compile(r"\s*" + _SUFFIX)
-# 市/省后面的区县段（深圳市南山区 → 深圳市南山区），避免脱敏后残留「南山区」。
-_DISTRICT_RE = re.compile(r"\s*[\u4e00-\u9fa5]{2,3}(?:区|县)")
 # 方位词在左，地名在右，命中从地名开始（不含方位词，脱敏只盖地名本身）
 _DIRECTIONAL_RE = re.compile(r"(?:" + _DIRECTION + r")\s*(" + _PLACE_ALT + r")")
-
-
-def _extend_with_suffix(text: str, end: int) -> int:
-    """把紧邻（允许中间空格）的行政后缀与区县段并入命中区间，返回新的结束位置。"""
-    match = _SUFFIX_RE.match(text, end)
-    if not match:
-        return end
-    end = match.end()
-    district = _DISTRICT_RE.match(text, end)
-    return district.end() if district else end
 @dataclass(frozen=True, slots=True)
 class PlaceMention:
     start: int
@@ -153,33 +141,43 @@ class PlaceMention:
     reason: str  # "suffix" / "direction"
 
 
+def _overlaps_sorted(taken: list[tuple[int, int]], start: int, end: int) -> bool:
+    """在「按 start 升序且互不重叠」的区间表里判断 [start, end) 是否与任一区间相交。
+
+    只查相邻两个区间即可：区间互不重叠，若前一个区间（start 最大的左侧区间）都不相交，
+    更靠左的区间 end 只会更小；右侧同理。
+    """
+    index = bisect_left(taken, (start,))
+    for position in (index - 1, index):
+        if 0 <= position < len(taken):
+            taken_start, taken_end = taken[position]
+            if start < taken_end and taken_start < end:
+                return True
+    return False
+
+
 def iter_place_mentions(text: str) -> list[PlaceMention]:
-    """扫描文本里的行政区地名，只保留有后缀或方位词作为依据的命中。"""
-    mentions: list[PlaceMention] = []
-    taken: list[tuple[int, int]] = []
+    """扫描文本里的行政区地名，只保留有后缀或方位词作为依据的命中。
 
-    def overlaps(start: int, end: int) -> bool:
-        return any(start < e and s < end for s, e in taken)
-
+    两轮扫描：先收「方位词 + 地名」，再收「地名 + 行政后缀」。同一个正则的 finditer
+    结果天然按位置升序且互不重叠，所以第二轮只需和第一轮区间做相交判断；
+    区间表用二分查找（原实现逐个线性扫描，地名密集长文本上退化成 O(n²)）。
+    """
+    directional: list[PlaceMention] = []
     for match in _DIRECTIONAL_RE.finditer(text):
         start, end = match.span(1)
-        if overlaps(start, end):
-            continue
-        # 后缀并入 span，避免脱敏后残留「省/市」暴露行政区层级。
-        end = _extend_with_suffix(text, end)
-        mentions.append(PlaceMention(start, end, text[start:end], "direction"))
-        taken.append((start, end))
+        directional.append(PlaceMention(start, end, match.group(1), "direction"))
+    taken = [(mention.start, mention.end) for mention in directional]
 
+    mentions: list[PlaceMention] = list(directional)
     for match in re.finditer(_PLACE_ALT, text):
         start, end = match.span()
-        if overlaps(start, end):
+        if _overlaps_sorted(taken, start, end):
             continue
-        # 只有当紧邻的后面出现行政后缀时，才算「有依据」；后缀本身也并入区间。
-        end = _extend_with_suffix(text, end)
-        if end == match.end():
+        # 只有当紧邻的后面出现行政后缀时，才算「有依据」
+        if not re.match(_SUFFIX, text[end:]) and not re.match(r"\s*" + _SUFFIX, text[end:]):
             continue
-        mentions.append(PlaceMention(start, end, text[start:end], "suffix"))
-        taken.append((start, end))
+        mentions.append(PlaceMention(start, end, match.group(0), "suffix"))
 
     mentions.sort(key=lambda item: item.start)
     return mentions

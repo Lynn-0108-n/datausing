@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
@@ -254,19 +254,26 @@ const LEVELS = ["L3", "L2", "L1", "SAFE"];
 const SAMPLES = [
   `客户张三，手机 13800138000，身份证 11010519491231002X，收货地址：福建省福州市鼓楼区五四路 100 号。`,
   JSON.stringify({ user: "张三", phone: "13800138000", id_card: "11010519491231002X", note: "改签" }, null, 2),
-  "name,phone,bank_card\n李四,13900139000,4111111111111111\n王五,13700137000,6222020200112233446",
+  "name,phone,bank_card\n李四,13900139000,4111111111111111\n王五,13700137000,6222020200112233445",
   "INSERT INTO orders (name, phone, api_key) VALUES ('赵六', '13600136000', 'sk-DEMO12345678');"
 ];
 let sampleIndex = 0;
 
 async function api(path, options = {}) {
-  const res = await fetch(API + path, options);
+  // 配了 FLOWMASK_API_TOKEN 时自动带 Bearer：token 放在 localStorage.flowmask_token
+  const headers = Object.assign({}, options.headers);
+  try {
+    const token = window.localStorage.getItem("flowmask_token");
+    if (token) headers.Authorization = `Bearer ${token}`;
+  } catch (e) { /* 隐私模式禁用 localStorage 时忽略 */ }
+  const res = await fetch(API + path, Object.assign({}, options, { headers }));
   const text = await res.text();
   let body = null;
   try { body = text ? JSON.parse(text) : null; } catch (e) { body = { raw: text }; }
   if (!res.ok) {
     const detail = body && body.detail ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail)) : res.status;
-    throw new Error(`${res.status} ${detail}`);
+    const hint = res.status === 401 ? "（需要 API Token：在浏览器 localStorage 设置 flowmask_token）" : "";
+    throw new Error(`${res.status} ${detail}${hint}`);
   }
   return body;
 }
@@ -307,9 +314,8 @@ function highlight(text, spans) {
   let out = "", cursor = 0;
   for (const span of sorted) {
     if (span.start < cursor || span.start >= text.length) continue;
-    const level = span.label ? "" : "";
     out += esc(text.slice(cursor, span.start));
-    out += `<mark class="${span.level || ""}" title="${esc(span.label || span.type)} · ${esc(span.rule || "")}">` +
+    out += `<mark title="${esc(span.label || span.type)} · ${esc(span.rule || "")}">` +
            esc(text.slice(span.start, span.end)) + "</mark>";
     cursor = Math.min(span.end, text.length);
   }
@@ -345,12 +351,21 @@ function renderDetect(data, originalText) {
   $("detect-meta").textContent =
     `${data.content_type} · ${data.segments} 个片段 · 耗时 ${data.duration_ms}ms` +
     (data.degraded ? " · 已降级（模型不可用，保留 L1 结论）" : "");
-  if (data.content_type === "text" && data.findings.length) {
-    const first = data.findings[0];
-    $("pane-orig").innerHTML = highlight(originalText, first.spans);
-    $("pane-masked").textContent = first.masked;
+  const masked = (data.masked_document && data.masked_document.masked) || "";
+  if (data.content_type === "text") {
+    // 原文从头高亮；没有命中也要显示原文，不能把原文面板换成脱敏 JSON
+    if (!originalText) {
+      $("pane-orig").textContent = "（文件检测不上传原文，这里只显示脱敏副本）";
+    } else {
+      $("pane-orig").innerHTML = data.findings.length
+        ? highlight(originalText, data.findings.flatMap((f) => f.spans || []))
+        : esc(originalText);
+    }
+    $("pane-masked").textContent = masked;
   } else {
-    $("pane-orig").textContent = JSON.stringify(data.masked_document, null, 2);
+    $("pane-orig").textContent = data.findings.length
+      ? data.findings.map((f) => `${f.path}\n  sha256: ${f.original_hash}`).join("\n")
+      : "（结构化文件不展示原文，只列命中位置与脱敏副本）";
     $("pane-masked").textContent = data.findings.map((f) => `${f.path}: ${f.masked}`).join("\n");
   }
 }
@@ -383,11 +398,14 @@ async function detectFile(file) {
   $("detect-err").textContent = "";
   const form = new FormData();
   form.append("file", file);
-  form.append("min_level", $("min-level").value);
+  // 选项走 query：后端 /detect/file 从查询参数读，FormData 里的字段不会被识别
+  const qs = new URLSearchParams({
+    min_level: $("min-level").value,
+    mask_level: $("mask-level").value || "",
+  });
   try {
-    const data = await api("/detect/file", { method: "POST", body: form });
+    const data = await api(`/detect/file?${qs.toString()}`, { method: "POST", body: form });
     renderDetect(data, "");
-    $("pane-orig").textContent = JSON.stringify(data.masked_document, null, 2);
   } catch (err) {
     $("detect-err").textContent = "文件检测失败：" + err.message;
   }
@@ -442,7 +460,7 @@ async function loadTaskFindings(taskId) {
     const page = await api(`/tasks/${taskId}/findings?page_size=50`);
     $("task-findings").innerHTML =
       `<div class="muted">任务 <code>${esc(taskId)}</code> 的检测结果（共 ${page.total} 条） ·
-        <a href="${API}/tasks/${taskId}/export?format=jsonl">导出 JSONL</a></div>` +
+        <a href="${API}/tasks/${encodeURIComponent(taskId)}/export?format=jsonl">导出 JSONL</a></div>` +
       findingsTable(page.items);
   } catch (err) {
     $("task-findings").innerHTML = `<div class="err">加载结果失败：${esc(err.message)}</div>`;

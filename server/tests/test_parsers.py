@@ -1,4 +1,4 @@
-﻿"""解析层测试：文本 / JSON / CSV / SQL / Word / PDF / 上传分派 / 编码兼容。"""
+"""解析层测试：文本 / JSON / CSV / SQL / Word / Excel / PDF / 上传分派 / 编码兼容。"""
 
 from __future__ import annotations
 
@@ -18,8 +18,11 @@ from app.parsers import (
     parse_sql,
     parse_text,
     parse_text_input,
+    parse_xlsx,
     supported_formats,
 )
+
+from xlsx_fixtures import make_xlsx, number_cell, row, shared_cell, text_cell
 
 _W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -180,11 +183,12 @@ def test_parse_pdf_extracts_text_layer() -> None:
     assert "13800138000" in text
 
 
-def test_supported_formats_includes_docx_and_pdf() -> None:
+def test_supported_formats_includes_docx_pdf_and_xlsx() -> None:
     formats = supported_formats()
     assert ".docx" in formats["supported"]
+    assert ".xlsx" in formats["supported"]
     assert ".pdf" in formats["supported"]
-    assert formats["docx"] is True
+    assert formats["docx"] is True and formats["xlsx"] is True
     # PDF 是否可用取决于可选依赖，这里只校验字段存在
     assert "pdf" in formats
 
@@ -192,3 +196,49 @@ def test_supported_formats_includes_docx_and_pdf() -> None:
 def test_parse_text_input_detects_json() -> None:
     assert parse_text_input('{"a":"13800138000"}').content_type == "json"
     assert parse_text_input("随便一段文本").content_type == "text"
+
+
+def test_parse_xlsx_uses_header_as_hint_and_skips_it() -> None:
+    rows = row(1, text_cell("A1", "姓名"), text_cell("B1", "手机号")) + row(
+        2, shared_cell("A2", 0), number_cell("B2", "13812345678")
+    )
+    document = parse_bytes("客户表.xlsx", make_xlsx([("客户表", rows)], shared_strings=["张三"]))
+    assert document.content_type == "xlsx"
+    # 表头行只做列名上下文，不当成检测段（与 CSV 口径一致）
+    assert [segment.path for segment in document.segments] == ["客户表!A2", "客户表!B2"]
+    assert [segment.hint for segment in document.segments] == ["姓名", "手机号"]
+    assert [segment.text for segment in document.segments] == ["张三", "13812345678"]
+    sheet = document.meta["xlsx"]["sheets"][0]
+    assert sheet["name"] == "客户表"
+    # 表头格保留原文（导出时回写），数据格记 segments 下标与单元格类型
+    assert sheet["rows"][0] == (1, [("A1", "s", "姓名"), ("B1", "s", "手机号")])
+    assert sheet["rows"][1] == (2, [("A2", "s", 0), ("B2", "n", 1)])
+
+
+def test_parse_xlsx_multiple_sheets_keep_order() -> None:
+    first = row(1, text_cell("A1", "邮箱")) + row(2, text_cell("A2", "zhangsan@example.com"))
+    second = row(1, text_cell("A1", "备注")) + row(2, text_cell("A2", "13800138000"))
+    document = parse_xlsx(make_xlsx([("客户", first), ("订单", second)]))
+    assert [segment.path for segment in document.segments] == ["客户!A2", "订单!A2"]
+    assert [segment.hint for segment in document.segments] == ["邮箱", "备注"]
+    assert [sheet["name"] for sheet in document.meta["xlsx"]["sheets"]] == ["客户", "订单"]
+
+
+def test_parse_xlsx_rejects_non_zip() -> None:
+    with pytest.raises(ParseError):
+        parse_xlsx(b"this is not an xlsx")
+
+
+def test_parse_xlsx_requires_workbook_xml() -> None:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("readme.txt", "hi")
+    with pytest.raises(ParseError) as excinfo:
+        parse_xlsx(buffer.getvalue())
+    assert "workbook.xml" in str(excinfo.value)
+
+
+def test_parse_xlsx_header_only_sheet_has_nothing_to_detect() -> None:
+    rows = row(1, text_cell("A1", "姓名"))
+    with pytest.raises(ParseError):
+        parse_xlsx(make_xlsx([("空表", rows)]))

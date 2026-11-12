@@ -21,7 +21,6 @@
    - `test(storage): 补充流记录写入测试`
 4. **不提交生成物**：编译产物、日志、临时文件不得入库；相关路径应写入 `.gitignore`。
 5. **工作目录限定**：所有与本项目相关的操作（文件创建与修改、测试、git 提交与推送等）一律在本仓库根目录内执行，不得在仓库之外生成或修改项目文件；当前仓库根目录为 `D:\dsh-project\datausing`。
-6. Avoid unnecessary secondary labels and descriptions.Let the layout do the explaining.
 
 ## 验证流程
 

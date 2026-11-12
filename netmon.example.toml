@@ -55,6 +55,17 @@ auto_capture_seconds = 15      # 自动抓包时长（秒）
 [plugins]
 dir               = ""         # 界面插件目录（*.json 声明式清单），例如 "/home/wuki/netmon-plugins"；留空表示不加载
 
+[dlp]
+# 在线 DLP 检测（默认关闭）：开启后采集链路把报文载荷投递到有界队列，
+# 由 worker 池异步做 L1 识别（规则+评分+脱敏），命中且达到 min_level 才写 dlp_findings。
+# 只落脱敏副本，原始正文不入库；队列满丢帧计数见 /api/v1/traffic/now 的 dlp_dropped。
+enabled           = false      # 是否启用在线检测
+mode              = "live"     # live | offline（仅用于日志展示，实际模式跟 core.source 一致）
+queue_size        = 4096       # 待分析载荷队列长度（1~65536），满则丢帧并计数
+workers           = 4          # 识别 worker 数（1~64）
+max_payload       = 65536      # 单条载荷最多分析多少字节（超出截断，并在 finding.reasons 标注）
+min_level         = "SAFE"     # 低于该级别的命中不落库：SAFE | L1 | L2 | L3
+
 [update]
 enabled           = false      # 是否允许客户端触发"一键升级"（默认关闭）
 allowed_prefixes  = ""         # 允许下载的 URL 前缀，逗号分隔；为空则一律拒绝

@@ -17,24 +17,21 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 
-from dotenv import load_dotenv
-
-# 启动时加载 server/.env 到环境变量（若存在）；FLOWMASK_* 前缀变量由 config.py 读取
-load_dotenv()
-
 from fastapi import APIRouter, Depends, FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
-from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .api.deps import require_token
-from .api.routes_audit import router as audit_router
+from .api.routes_alerts import router as alerts_router
 from .api.routes_assistant import router as assistant_router
+from .api.routes_audit import router as audit_router
 from .api.routes_detect import router as detect_router
 from .api.routes_findings import router as findings_router
 from .api.routes_health import router as health_router
 from .api.routes_keywords import router as keywords_router
+from .api.routes_plugins import router as plugins_router
 from .api.routes_dynamic import router as dynamic_router
 from .api.routes_preferences import router as preferences_router
 from .api.routes_rules import router as rules_router
@@ -43,8 +40,12 @@ from .api.routes_stats import router as stats_router
 from .api.routes_tasks import router as tasks_router
 from .api.routes_traffic import router as traffic_router
 from .core.paths import frontend_dir, resource_root
+from .core.staticfiles import FrontendStaticFiles
 from .core.config import get_settings
 from .core.db import get_database
+from .plugins import load_plugins
+from .security import SecurityError, security_error_response, validation_error_response
+from .identify.snapshots import get_snapshot_store
 from .traffic.live import get_live_manager
 
 # 自带单页控制台随包分发：开发态是 server/app/webui，打包后是解包目录下的 app/webui
@@ -58,9 +59,11 @@ FlowMask：网络与文档流量的分级脱敏与审计溯源系统（数据安
 
 - **自带控制台**：启动后打开 `/ui`（左右对照 + 任务/审计 + 统计看板 + 规则启停），无需前端构建
 
-- **输入**：粘贴文本 / 上传 txt·json·csv·sql（Word·PDF 待接入）/ pcap 离线检测（另一 CLI）
+- **输入**：粘贴文本 / 上传 txt·json·csv·sql·docx·pdf·xlsx（图片 OCR 需可选依赖）/ pcap 离线检测（另一 CLI）
 - **识别**：L1 规则（12 条 + 校验位）→ L2 BERT 语义（可选）→ L3 本地大模型复核（可选）
 - **输出**：四级敏感度 + 脱敏副本 + 可复算的置信度向量 + HMAC 哈希链审计日志
+- **增强**：6 种脱敏策略（block/partial/hash/generalize/pseudonym/encrypt）与脱敏文件导出；
+  本地 AI 助手（场景模板 / 策略推荐 / 风险研判，默认纯规则，可选本机 Ollama，数据不出机）
 
 评审提示：`/docs` 里可直接试调接口；`/api/v1/detect` 是不落库的即时检测，
 `/api/v1/tasks` 是带留痕的后台任务。
@@ -70,10 +73,12 @@ FlowMask：网络与文档流量的分级脱敏与审计溯源系统（数据安
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """应用退出时停掉所有实时跟随线程，避免残留线程继续写库。"""
+    get_snapshot_store().start()
     try:
         yield
     finally:
         get_live_manager().stop_all()
+        get_snapshot_store().close()
 
 
 def create_app() -> FastAPI:
@@ -81,6 +86,8 @@ def create_app() -> FastAPI:
     db = get_database()
     db.init()
     sync_active_rules(db)
+    # 内置插件 + 第三方插件（FLOWMASK_PLUGINS）在启动时登记一次；失败只记警告
+    load_plugins(settings)
 
     app = FastAPI(
         lifespan=_lifespan,
@@ -93,13 +100,17 @@ def create_app() -> FastAPI:
             {"name": "tasks", "description": "后台任务：上传/粘贴 → 识别 → 落库 → 审计"},
             {"name": "traffic", "description": "流量接入：pcap 导入 / 外部推送 / 实时旁路跟随 → 同一套识别分级与审计"},
             {"name": "findings", "description": "检测结果查询"},
+            {"name": "alerts", "description": "分级告警与脱敏建议（检测 → 告警 → 处置）"},
+            {"name": "assistant", "description": "本地 AI 助手：场景模板、脱敏策略推荐与风险研判（默认纯规则，可选本机 Ollama）"},
+            {"name": "plugins", "description": "可扩展：引擎 / 算子 / 解析器插件注册表"},
             {"name": "stats", "description": "看板统计"},
             {"name": "rules", "description": "内置/自定义敏感规则"},
             {"name": "audit", "description": "审计溯源与哈希链校验"},
             {"name": "preferences", "description": "用户偏好（主题）与多用户记忆"},
-            {"name": "assistant", "description": "AI 助手（解读与推荐，只接收聚合计数/用途标签）"},
         ],
     )
+    app.add_exception_handler(SecurityError, security_error_response)
+    app.add_exception_handler(RequestValidationError, validation_error_response)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.cors_origins),
@@ -111,30 +122,33 @@ def create_app() -> FastAPI:
     router = APIRouter(prefix="/api/v1", dependencies=[Depends(require_token)])
     for sub in (
         health_router,
-    keywords_router,
-    detect_router,
-    tasks_router,
-    traffic_router,
-    findings_router,
-    stats_router,
-    rules_router,
-    audit_router,
-    dynamic_router,
-    preferences_router,
-    assistant_router,
+        keywords_router,
+        detect_router,
+        tasks_router,
+        traffic_router,
+        findings_router,
+        alerts_router,
+        assistant_router,
+        plugins_router,
+        stats_router,
+        rules_router,
+        audit_router,
+        dynamic_router,
+        preferences_router,
     ):
         router.include_router(sub)
     app.include_router(router)
 
     # 正式前端：Vue3 + Element Plus + ECharts，构建产物挂在 /app
-    # （vite base=/app/，所以刷新/深链都不会 404）
+    # （vite base=/app/，所以刷新/深链都不会 404；入口 HTML 走 no-cache，
+    #  带哈希的 assets/ 走一年 immutable，重新构建后刷新即可见新版）
     if FRONTEND_DIR.is_dir():
-        app.mount("/app", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+        app.mount("/app", FrontendStaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
 
     # 自带控制台：纯静态单页（无构建步骤、无外网依赖），评委打开根路径即可用；
     # 打包时若单页资源缺失也不至于让进程起不来（/app 或 /docs 仍可用）
     if WEBUI_DIR.is_dir():
-        app.mount("/ui", StaticFiles(directory=WEBUI_DIR, html=True), name="webui")
+        app.mount("/ui", FrontendStaticFiles(directory=WEBUI_DIR, html=True), name="webui")
 
     @app.get("/", include_in_schema=False)
     def index() -> RedirectResponse:

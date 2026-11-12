@@ -44,15 +44,21 @@ def sync_active_rules(db: Database) -> None:
             continue
         try:
             pattern = re.compile(row["pattern"])
-        except re.error:
+            entity_type = EntityType(row["type"])
+            weight = float(row["weight"])
+            confidence = float(row["confidence"])
+        except (re.error, ValueError, TypeError):
             continue  # 坏规则跳过：不能让一条脏数据拖垮整条检测链路
+        # 自定义规则允许没有捕获组（历史数据/直接写库）：退化为整段匹配，
+        # 避免 match.group(1) 抛 IndexError 把 detect() 打成 500。
         active.append(
             Rule(
                 name=rule_id,
-                type=EntityType(row["type"]),
+                type=entity_type,
                 pattern=pattern,
-                weight=float(row["weight"]),
-                confidence=float(row["confidence"]),
+                weight=weight,
+                confidence=confidence,
+                group=1 if pattern.groups else 0,
             )
         )
     set_active_rules(tuple(active))
@@ -112,33 +118,13 @@ def list_rules(db: Database = Depends(db_dep)) -> list[RuleOut]:
     return items
 
 
-_RULE_ID_PATTERN = re.compile(r"^[a-z0-9_]{2,32}$")
-
-
-def _generate_rule_id(name: str, taken: set[str]) -> str:
-    """按规则名生成 id：英文名直接用（同名自定义规则即覆盖），中文名回退 custom_<8位hex>。
-
-    前端表单只有「规则名」，没有 id 输入框；``taken`` 只放内置规则 id，
-    这样和内置规则同名时会换一个 id，不会误改内置规则。
-    """
-    candidate = name.strip().lower()
-    if _RULE_ID_PATTERN.fullmatch(candidate) and candidate not in taken:
-        return candidate
-    for _ in range(20):
-        candidate = f"custom_{uuid.uuid4().hex[:8]}"
-        if candidate not in taken:
-            return candidate
-    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="规则 id 生成失败，请重试")
-
-
 @router.post("/rules", response_model=RuleOut, status_code=status.HTTP_201_CREATED, summary="新增自定义规则")
 def create_rule(payload: RuleIn, db: Database = Depends(db_dep)) -> RuleOut:
-    if payload.id:
-        rule_id = payload.id
-        if rule_id in _BUILTIN_IDS:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"规则 id 与内置规则重名: {payload.id}")
-    else:
-        rule_id = _generate_rule_id(payload.name, set(_BUILTIN_IDS))
+    rule_id = payload.id or f"custom_{uuid.uuid4().hex[:8]}"
+    if rule_id in _BUILTIN_IDS:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"规则 id 与内置规则重名: {rule_id}")
+    if rule_id in _db_rows(db):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"自定义规则已存在: {rule_id}")
     _upsert(db, rule_id, payload.name, payload.type, payload.pattern, payload.weight, payload.confidence, payload.enabled)
     sync_active_rules(db)
     return _custom_out(_db_rows(db)[rule_id])

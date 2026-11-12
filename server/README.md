@@ -7,12 +7,12 @@
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
-| 文本/JSON/CSV/SQL/Word/PDF/图片 OCR 解析与分段定位 | ✅ | 文本整段；JSON 走 `$` 路径；CSV/TSV 每单元格 `row{n}.{列名}`；SQL 提取 DML 字符串字面量；Word 段落 `p{n}` / 表格 `table{表}.{行}.{列}`；PDF 按页 `page{n}`（依赖可选 `pdfplumber`）；图片 png/jpg/jpeg 走 OCR（`FLOWMASK_OCR_ENABLED=1` + `rapidocr-onnxruntime`） |
+| 文本/JSON/CSV/SQL/Word/Excel/PDF 解析与分段定位 | ✅ | 文本整段；JSON 走 `$` 路径；CSV/TSV 每单元格 `row{n}.{列名}`；SQL 提取 DML 字符串字面量；Word 段落 `p{n}` / 表格 `table{表}.{行}.{列}`；Excel 每张表首行作列名（表头不检测）、数据单元格 `{工作表}!{坐标}`（零依赖 zip+XML，免 openpyxl）；PDF 按页 `page{n}`（依赖可选 `pdfplumber`） |
 | pcap 流量导入（服务端） | ✅ | 上传 pcap/pcapng → TCP 重组 + HTTP 请求解析 → 每个正文当一个片段，复用同一套识别/分级/脱敏/任务/审计；`GET /traffic/sample` 提供自带示例（`samples/demo-traffic.pcap`）；HTTPS、压缩体与分块传输暂不解析 |
 | 实时旁路（跟随抓包文件） | ✅ | 服务端持续跟随一个不断增长的抓包文件（由 dumpcap/Wireshark/自研采集器写），按「落库窗口」把新正文汇总成检测任务；**pcap 与 pcapng 都支持**（dumpcap 默认写 pcapng）；`/traffic/live*` 管理会话，演示脚本 `samples/simulate_live_traffic.py` |
-| L1 规则识别 | ✅ | 18 条规则（含 4 条自由文本 + 无冒号姓名/户名识别）+ 省/市地名库补白 + 三级敏感词表（66 词，Aho-Corasick） + 身份证 MOD 11-2 / 银行卡 Luhn / IPv4 校验；另加编码载荷解码复核（base64 / URL-safe / hex / 百分号，两层嵌套） |
+| L1 规则识别 | ✅ | 17 条规则（含 4 条自由文本）+ 省/市地名库补白 + 三级敏感词表（66 词，Aho-Corasick） + 身份证 MOD 11-2 / 银行卡 Luhn / IPv4 校验；另加编码载荷解码复核（base64 / URL-safe / hex / 百分号，两层嵌套） |
 | 敏感度评分与四级分级 | ✅ | 加权最大 + 多标签共现修正 + 极端类别直达（L3/L2/L1/SAFE） |
-| 四级脱敏 + 左右对照 | ✅ | L3 高危全屏蔽（身份证/地址/医疗按结构脱敏：身份证保留前 6 位与后 4 位，地址保留省/市/区、街道起用 `*`，医疗保留字段名、字段值用 `*`）、L2 按类别遮掩（手机/邮箱留首字符；姓名全星号；银行卡占位；身份证/地址/医疗同上）、L1 警示 + 同 L2 遮掩、SAFE 原文；输出「原文哈希 + 脱敏副本 + 命中区间（spans）」供前端高亮，原文不入库 |
+| 四级脱敏 + 左右对照 | ✅ | L3 全屏蔽、L2 保留首字符+星号、L1 前置警示、SAFE 原文；输出「原文哈希 + 脱敏副本 + 命中区间（spans）」供前端高亮，原文不入库 |
 | L2 语义识别（独立推理服务） | ✅ | `l2_service/` HTTP 服务：mock / ONNX int8 / auto 三后端；已用 bert-base-chinese 微调模型实测（单条 10–33 ms，CPU）；基座对比 roberta-wwm-ext 96.0% < bert 98.7%，保留 bert |
 | L1.5 实体识别（NER，可选） | ✅ | `app/identify/ner.py`：BERT4NER 补人名/地址（B-PER/B-LOC）；自由文本类型召回 22.2% → 100%（8 条探针）、公开语料压力集 200 条准确率 0.0% → 89.0%（`python -m ner_probe`），代价约 +60–70 ms/条 CPU 前向；结构化数据上会多出类别 ⇒ **服务端不做默认开启**，由每次请求的 `enable_ner` 决定（前端检测页有「自由文本 NER」开关 + 状态标签） |
 | L3 本地大模型复核 | ✅ | 独立 `l3_service` 双后端：**指令裁判**（Qwen2.5-1.5B-Instruct，按本项目四级标准直出 `level/reason/categories`，默认推荐）或**护栏**（Qwen3Guard-Gen-0.6B，Safe/Controversial/Unsafe）；只复核 L1 灰区、只升不降、默认封顶 L2，异常即降级 |
@@ -21,15 +21,17 @@
 | 审计哈希链 | ✅ | HMAC-SHA256 链式签名，可校验、可导出；篡改/删除能定位到断链条目 |
 | 统计看板数据 | ✅ | 分级分布、类别 TopN、评分直方图、任务数 |
 | 单页可视化（左右对照） | ✅ | `GET /ui/` 内置页面：上传/粘贴 → 左原文高亮、右脱敏副本、分级统计，无需装前端工具链 |
-| 正式前端（Vue3 + Element Plus + ECharts） | ✅ | `web/`：7 个页面（内容检测·左右对照/批量/场景/动态脱敏 / 流量导入 / 检测记录与审计链 / 统计看板 / 识别规则 / 设置 / 帮助），`npm run build` 后由服务端挂在 `/app`；未构建时自动回落到 `/ui/` |
+| 正式前端（Vue3 + Element Plus + ECharts） | ✅ | `web/`：7 个页面（即时检测·左右对照 / 批量检测·多文件 / 流量导入·pcap / 任务与审计链 / 统计看板 / 识别规则 / 动态脱敏），`npm run build` 后由服务端挂在 `/app`；未构建时自动回落到 `/ui/` |
 | 自定义规则 | ✅ | 增删启停 + 正则合法性校验，库内持久化 |
-| 场景模式 | ✅ | 内置医疗 / 政务 / 电商 / 金融 / HR / 审计 6 个场景，一键套用推荐级别、脱敏策略与识别开关；自定义场景存前端 localStorage |
-| 导出侧多策略脱敏 | ✅ | `/detect/export`、`/detect/file/export` 支持 `block` / `partial` / `hash` / `generalize` / `pseudonym` / `encrypt` 六种策略，与四级分级正交 |
 | 评测跑分 | ✅ | 自建标注集 **351 条**（策展 75 + 生成 225 + 稀有类别补样 51，id/内容唯一、与训练集 0 重叠）+ 200 条 NER 压力集；L1 only 准确率 94.0%、自由文本压力集纯 L1 52.5%，接 L2 后 99.7%、安全误报率 20.8%→0.0%，`--compare-l2` 一条命令复现 |
 | 浅色 / 深色主题 | ✅ | 顶栏开关一键切换，首次跟随系统外观、手动选择后记住；**偏好可按操作人存服务端**（换浏览器/换机器仍生效，服务端 `FLOWMASK_DEFAULT_THEME` 定默认）；页面、表格与 ECharts 图表同步换肤，`?theme=dark` 可临时覆盖（截图/演示用） |
 | 批量检测（多文件） | ✅ | `POST /tasks/batch` 一次最多 20 个文件，一个文件一个任务；单个坏文件只在结果里标错，不影响同批其它文件 |
 | 性能基准 | ✅ | `server/bench.py` 本机实测：L1 **0.022 ms**/条（≈4.4 万条每秒）、端到端 `/detect` **2.18 ms**（≈459 请求/秒）、L2 int8 单条 7.4→4.1 ms、L3 1.5B **1.16 s**/条；报告 `docs/性能报告.md` 可一条命令复跑 |
 | 动态脱敏视图（授权切换） | ✅ | `POST /api/v1/dynamic/render`：未授权返回脱敏副本、授权返回原文并写审计链；`GET /dynamic/policy` 给出四级策略表；内置页面「动态脱敏」页签可直接演示 |
+| 脱敏策略与文件导出 | ✅ | 6 种策略（block/partial/hash/generalize/pseudonym/encrypt）：`GET /mask-strategies`、`POST /detect/export`（text/json/csv/sql）、`POST /detect/file/export`（docx→docx、xlsx→xlsx、pdf→txt）、`POST /detect/decrypt`；哈希/伪名确定性加盐，加密用 HMAC-SHA256 计数器流，密钥 `FLOWMASK_EXPORT_SECRET`（默认自动生成落 `export_secret.key`） |
+| 使用场景模板 | ✅ | `GET /scenarios`：7 个模板（医院→科研 / 金融风控 / 教学·学生数据 / 安全审计留痕 / 对外发布演示 / 科研分析 / 演示），一次给出策略 + 强制脱敏级别 + L2/L3/NER 开关与留存说明 |
+| 本地 AI 助手 | ✅ | `/assistant/health|models|suggest|advise`：默认 `rules` 纯本地规则、零模型；`FLOWMASK_ASSISTANT_MODE=ollama` 接本机模型，失败自动降级且接口仍 200；输入只含字段名/计数，不传敏感值 |
+| 图片 OCR（可选） | ✅ | `requirements-ocr.txt`（rapidocr-onnxruntime + pillow）+ `FLOWMASK_OCR_ENABLED=1`；`/detect/file` 接收 png/jpg/jpeg/bmp/webp 并 OCR 取文字；未启用时 `/formats` 给提示、解析返回 422 固定文案 |
 | L2 训练侧（RoBERTa 多标签） | ✅ | `l2_training/`：11 标签（10 敏感 + benign）、自举数据（默认 800 条，含 30% 困难负例）、弱标注、数据体检、微调 + ONNX 导出；本机真模型 macro-F1 **0.9844**、benign F1 **0.954** |
 | L3 训练侧（LoRA 指令微调） | ✅ | `l3_training/`：351 条评测集金标 → 指令样本（级别 + 类别 + 模板理由），LoRA 微调 Qwen2.5-1.5B；裁判单任务准确率 **60.0% → 76.2%**（80 条分层样本），合并成完整权重后 `FLOWMASK_L3_MODE=instruct` 直接加载 |
 
@@ -61,8 +63,7 @@ scripts\stop_local.cmd                            # 停止全部
 ### 2.2 手动启动（分步调试用）
 
 ```powershell
-# 默认套件：未装可选依赖 / 未生成评测集时排除对应测试文件
-python -m pytest -o addopts="" -q --ignore=tests/test_bench.py --ignore=tests/test_desktop.py --ignore=tests/test_ner_probe.py --ignore=tests/test_eval_dataset.py    # 443 个用例（440 通过 + 3 跳过）
+python -m pytest -o addopts="" -q    # 630 个用例（625 通过 + 5 跳过；4 个性能预算用例需 FLOWMASK_RUN_PERF=1）
 python -m bench --markdown-out ../docs/性能报告.md   # 性能基准（L1/端到端/L2；加 --l3-endpoint 测 L3）
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8090
 # 构建正式前端（可选，需 Node 18+；产物在 ../web/dist）
@@ -70,7 +71,6 @@ cd ../web && npm install && npm run build && cd ../server
 # 打开 http://127.0.0.1:8090/app/ 用正式前端（构建过时根路径自动跳这里）
 # 或 http://127.0.0.1:8090/ui/ 用零依赖内置单页；接口文档在 /docs
 # 想支持 PDF：pip install pdfplumber（未安装时 /formats 会提示，上传 PDF 返回 415）
-# 想支持图片 OCR：pip install rapidocr-onnxruntime，并设 FLOWMASK_OCR_ENABLED=1
 ```
 
 一次最小闭环（PowerShell）：
@@ -93,6 +93,21 @@ curl.exe -s "http://127.0.0.1:8090/api/v1/tasks/1/findings"
 curl.exe -s "http://127.0.0.1:8090/api/v1/stats"
 curl.exe -s "http://127.0.0.1:8090/api/v1/audit/verify"
 curl.exe -s -o findings.jsonl "http://127.0.0.1:8090/api/v1/tasks/1/export?format=jsonl"
+
+# 5) 审计导出离线验签：文件拷到任意机器都能复算哈希链（不连数据库、不起服务）
+curl.exe -s -o audit.jsonl "http://127.0.0.1:8090/api/v1/audit/export?format=jsonl"
+python -m scripts.verify_export audit.jsonl
+# 链很长时用游标分页导出完整链（after_id=0 从链头开始；响应头 Next-After-Id 给下一页游标）
+curl.exe -s -D headers.txt -o page1.jsonl "http://127.0.0.1:8090/api/v1/audit/export?format=jsonl&after_id=0&limit=1000"
+
+# 6) 分级告警：任务落库时自动生成，按级别/状态过滤，可认领或忽略
+curl.exe -s "http://127.0.0.1:8090/api/v1/alerts?level=L3"
+curl.exe -s "http://127.0.0.1:8090/api/v1/alerts/summary"
+curl.exe -s -X POST http://127.0.0.1:8090/api/v1/alerts/1/ack -H "Content-Type: application/json" `
+  -d '{\"status\":\"ack\",\"note\":\"已通知业务方脱敏\"}'
+
+# 7) 扩展点总览：内置 4 引擎 / 4 算子 / 6 解析器；第三方插件加载失败只在 warnings 里提示
+curl.exe -s "http://127.0.0.1:8090/api/v1/plugins"
 ```
 
 ## 3. 多模型协同（L2 推理服务）
@@ -334,13 +349,21 @@ python -m app.evaluate     # 默认 L1 only，几秒钟出结果
 | GET | `/health` | 健康检查（版本、时间、L2/L3 是否启用） |
 | POST | `/detect` | 即时检测文本（不落库） |
 | POST | `/detect/file` | 即时检测上传文件（multipart） |
+| GET | `/mask-strategies` | 6 种脱敏策略清单、说明与示例（前端策略下拉用） |
+| POST | `/detect/export` | 即时脱敏导出：`{text, content_type: text\|json\|csv\|sql, strategy, fmt?}` → 直接返回脱敏文件字节 |
+| POST | `/detect/file/export` | 上传文件即时导出（docx→docx、xlsx→xlsx、pdf→txt、csv/json/sql→同格式） |
+| POST | `/detect/decrypt` | 还原 `enc:` 加密片段（`{ciphertext}`，服务端 `FLOWMASK_EXPORT_SECRET`） |
+| GET | `/scenarios` | 使用场景模板（7 个；检测页「使用场景」与 AI 推荐共用） |
+| GET | `/assistant/health` / `/assistant/models` | 本地 AI 助手状态 / 本机模型列表（ollama） |
+| POST | `/assistant/suggest` | 推荐脱敏方案（只传场景/字段名/计数/用途说明，不传敏感值） |
+| POST | `/assistant/advise` | 按聚合统计做风险研判（看板用；可带筛选范围与告警处置汇总，响应 `source` 区分规则分析/本机模型/回退） |
 | GET | `/formats` | 支持的格式、已接入/待接入、各格式是否可用 |
 | GET | `/traffic/formats` | 流量导入支持的格式与限制（pcap/pcapng、上传上限） |
 | POST | `/traffic/import` | 上传 pcap：解析 HTTP 正文并创建检测任务（201 + 任务 ID 与解析统计） |
 | GET | `/traffic/sample` | 下载自带示例抓包 `demo-traffic.pcap`（3 条会话，含 L3/L2/SAFE） |
 | POST | `/traffic/ingest` | 外部推送正文片段（Go 采集端/Agent 用），复用同一套识别与落库 |
 | POST | `/traffic/live/start` | 开始实时跟随：`{pcap_path, interval_ms, window_s, ...}` → 返回会话（201） |
-| GET | `/traffic/live` | 实时会话列表（报文/片段/窗口任务数、最近任务、最近错误） |
+| GET | `/traffic/live` | 实时会话列表（报文/片段/窗口任务数、最近任务、最近错误、按会话聚合的告警统计） |
 | POST | `/traffic/live/{live_id}/stop` | 停止跟随（会把未写完的窗口先落库） |
 | DELETE | `/traffic/live` | 清理已停止的会话 |
 | POST | `/tasks` | 上传文件建任务 |
@@ -350,21 +373,28 @@ python -m app.evaluate     # 默认 L1 only，几秒钟出结果
 | GET | `/tasks/{id}/findings` | 任务结果（`level`/`page`/`page_size`） |
 | GET | `/tasks/{id}/export?format=jsonl\|json\|csv\|sql` | 导出脱敏结果 |
 | GET | `/tasks/{id}/export/privacy?format=jsonl\|json&epsilon=&l=` | 隐私增强导出（DP 计数 + l-多样性） |
-| GET | `/findings` / `/findings/{id}` | 全量结果查询 |
-| GET | `/stats` | 看板：分级分布、类别 TopN（`by_type` 每项含 `key` 中文名 / `type` 英文键 / `count`）、评分直方图 |
-| GET/POST/PATCH/DELETE | `/rules` `/rules/{id}` | 规则查询、新增（`id` 可省略，由规则名生成）、启停、删除（内置规则可启停不可删） |
+| GET | `/findings` / `/findings/{id}` | 全量结果查询（`task_id`/`level`/`types`/`content_type`/`start`/`end`/`days`/`tz_offset`/`page`/`page_size`） |
+| GET | `/stats` | 看板：筛选内分级分布、类别 TopN、评分直方图、按日趋势、风险处置汇总与筛选维度（`level`/`types`/`content_type`/`task_id`/`start`/`end`/`days`/`tz_offset`；旧字段兼容） |
+| GET | `/alerts` | 分级告警列表（`task_id`/`level`/`status`/`types`/`content_type`/`start`/`end`/`days`/`tz_offset`/`page`/`page_size`） |
+| GET | `/alerts/summary` | 告警汇总（总数、待处理数、已处理数与比例、按级别/状态分布、同一套筛选参数） |
+| GET | `/alerts/{id}` | 告警详情（含脱敏建议与来源 finding） |
+| POST | `/alerts/{id}/ack` | 认领/忽略/重置告警（`{status: ack\|ignored\|open, note?}`，按 `X-Operator-Id` 留痕） |
+| GET/POST/PATCH/DELETE | `/rules` `/rules/{id}` | 规则查询、新增、启停、删除（内置规则可启停不可删） |
 | GET | `/audit` | 审计日志分页 |
 | GET | `/audit/verify` | 校验哈希链（返回是否完整、断链位置） |
 | GET | `/dynamic/policy` | 动态脱敏策略表（四级各自的未授权/授权行为） |
 | POST | `/dynamic/render` | 动态脱敏渲染：`{text, authorized, mask_level?}`；每次渲染写审计链 |
-| GET | `/audit/export?format=jsonl\|json\|csv` | 审计导出 |
+| GET | `/audit/export?format=jsonl\|json\|csv&after_id=&limit=` | 审计导出：不传 `after_id` 导最近 `limit` 条（默认 200）；传 `after_id=0` 起游标分页导出完整链 |
 | GET | `/preferences` | 当前操作人的界面偏好（按 `X-Operator-Id` 区分；返回 `operator_id`/`theme`/`default_theme`/`available_themes`，`theme` 为空表示沿用默认） |
 | GET | `/preferences/users` | 已保存过偏好的操作人列表（前端顶栏「用户」下拉用） |
 | PUT | `/preferences` | 保存界面偏好：`{"theme": "light\|dark\|system"}` |
 | DELETE | `/preferences` | 清除当前操作人偏好（回落服务端默认主题） |
 | GET | `/keywords` | 当前生效的敏感词表（`tier`/`limit` 过滤；返回总条目数与三级分布） |
+| GET | `/plugins` | 已注册的引擎 / 算子 / 解析器（含第三方插件加载状态与 `warnings`） |
 
 鉴权：设置 `FLOWMASK_API_TOKEN` 后，`/api/v1/*` 需 `Authorization: Bearer <token>`；留空即本机演示模式。
+前端（`web/` 与内置单页）会自动从浏览器 `localStorage.flowmask_token` 读取该 token 并加到请求头；
+未设置时 401 会提示去 localStorage 配置，不会静默失败。
 
 ## 6. 隐私增强导出（差分隐私 + l-多样性）
 
@@ -410,6 +440,8 @@ dumpcap -i 1 -w data/live.pcapng -b filesize:10240   # pcapng 同样是支持的
 语义与边界：
 
 - **窗口 = 一个任务**：`window_s` 到了就把这段时间新出现的正文汇总成一个检测任务，结果自动进「任务与审计链」「统计看板」，审计链照常逐条追加；
+- **告警联动**：窗口任务落库时同一事务内生成分级告警（9.2 的 `alerts` 表），`GET /traffic/live` 的每个会话额外返回
+  `alert_total / alert_open / alert_by_level / last_alert_id / last_alert_title`，前端实时面板直接展示「待处理/总数 + 最近一条」；
 - **去重**：同一 HTTP 请求（方法+路径+正文）只检测一次，跨窗口重复的握手/重传不会重复报；
 - **延迟**：最坏 = `interval_ms` + `window_s`，默认约 2.5 s；
 - **容器格式**：经典 pcap 与 pcapng 都支持（`dumpcap`/Wireshark 默认导出 pcapng）；pcapng 按块增量解析，
@@ -424,7 +456,8 @@ dumpcap -i 1 -w data/live.pcapng -b filesize:10240   # pcapng 同样是支持的
 | `FLOWMASK_DATA_DIR` | `server/data` | 数据目录 |
 | `FLOWMASK_DB_PATH` | `<data_dir>/flowmask.db` | SQLite 路径 |
 | `FLOWMASK_API_TOKEN` | 空 | 非空则开启 Bearer 鉴权 |
-| `FLOWMASK_AUDIT_SECRET` | `flowmask-demo-secret` | 审计链 HMAC 密钥（演示值，生产必须换） |
+| `FLOWMASK_AUDIT_SECRET` | 空（自动生成） | 审计链 HMAC 密钥；留空则首次启动生成 64 位随机 hex 写入 `<data_dir>/audit_secret.key`，迁移数据目录需一并带走；旧库历史链可显式填 `flowmask-demo-secret` |
+| `FLOWMASK_REVEAL_OPERATORS` | 空 | 动态脱敏「查看原文」的服务端白名单（逗号分隔操作人 ID）；留空表示一律只返回脱敏副本 |
 | `FLOWMASK_ENABLE_L2` | `false` | 是否升级 L2 语义识别 |
 | `FLOWMASK_L2_ENDPOINT` | `http://127.0.0.1:8091/v1/classify` | BERT 推理服务地址 |
 | `FLOWMASK_ENABLE_L3` | `false` | 是否启用 L3 大模型复核 |
@@ -432,7 +465,7 @@ dumpcap -i 1 -w data/live.pcapng -b filesize:10240   # pcapng 同样是支持的
 | `FLOWMASK_L3_ENDPOINT` | `http://127.0.0.1:8092/v1/judge` | L3 服务地址（`l3_service`） |
 | `FLOWMASK_L3_MODEL` | `qwen3guard-gen-0.6b` | 模型名（仅展示/日志用） |
 | `FLOWMASK_L3_MODEL_DIR` | `server/models/qwen3guard-gen-0.6b` | 本地权重目录（ModelScope 下载到此处；instruct 模式指向 `qwen2.5-1.5b-instruct`） |
-| `FLOWMASK_L3_DEVICE` / `FLOWMASK_L3_DTYPE` | `auto` / `auto` | `cuda`/`cpu`；`auto`=GPU bf16、CPU fp32 |
+| `FLOWMASK_L3_DEVICE` / `FLOWMASK_L3_DTYPE` | `auto` / `auto` | 设备：`cpu`/`cuda`/`cuda:0`；`auto`=有 CUDA 用 GPU、否则 CPU；显式 cuda 但无 GPU 时自动回退 CPU 并告警。dtype：`auto`=GPU bf16、CPU fp32（4B 权重建议显式 `bf16`） |
 | `FLOWMASK_L3_MAX_TARGET` | `L2` | L3 升级上限；设 `L3` 才允许抬到高危 |
 | `FLOWMASK_L3_TRUST_LEVEL_HINT` | `1` | 是否采信指令模型的分级建议 |
 | `FLOWMASK_L3_CATEGORY_RAISE` | `0` | 类别感知（点出 PII 即抬中危）；实测会显著降准确率，默认关 |
@@ -440,23 +473,35 @@ dumpcap -i 1 -w data/live.pcapng -b filesize:10240   # pcapng 同样是支持的
 | `FLOWMASK_MAX_UPLOAD_MB` | `20` | 上传大小上限 |
 | `FLOWMASK_CORS_ORIGINS` | 本机 5173/8080 | 允许跨域的前端地址，逗号分隔 |
 | `FLOWMASK_DISABLE_DECODE` | 空（开启） | 设为 1 关闭 base64 / 百分号编码的载荷解码复核 |
+| `FLOWMASK_ALERT_MIN_LEVEL` | `L1` | 告警阈值：级别 ≥ 该值才进告警队列（`L3` 只看高危） |
+| `FLOWMASK_PLUGINS` | 空 | 第三方插件入口，逗号分隔的 `module:register`（缺省 register） |
+| `FLOWMASK_EXPORT_SECRET` | 空（自动生成） | 脱敏导出密钥（哈希盐/伪名/可逆加密）；留空首次启动生成并写 `<DATA_DIR>/export_secret.key`，换机还原需带同文件 |
+| `FLOWMASK_OCR_ENABLED` | `0` | 设为 1 启用图片 OCR（需先 `pip install -r requirements-ocr.txt`） |
+| `FLOWMASK_OCR_MAX_SIDE` | `1600` | 参与 OCR 的图片长边上限（像素），过大先等比缩放 |
+| `FLOWMASK_ASSISTANT_ENABLED` | `1` | 本地 AI 助手总开关（`rules` 模式不需模型） |
+| `FLOWMASK_ASSISTANT_MODE` | `rules` | `rules` 零模型 / `ollama` 接本机模型（失败自动降级 rules） |
+| `FLOWMASK_ASSISTANT_ENDPOINT` / `FLOWMASK_ASSISTANT_MODEL` | `http://127.0.0.1:11434/api/generate` / `qwen2.5:1.5b` | ollama 端点与模型名 |
+| `FLOWMASK_ASSISTANT_TIMEOUT_S` | `5.0` | 助手调用本机模型的超时（秒），超时降级 rules |
 
 ## 9. 代码结构
 
 ```text
 server/
   app/
-    main.py            FastAPI 入口（建库 → 规则启停 → 挂路由）
+    main.py            FastAPI 入口（建库 → 规则启停 → 插件加载 → 挂路由）
+    plugins.py         插件注册表：engine/operator/parser 扩展点（内置 + FLOWMASK_PLUGINS）
+    scenarios.py       使用场景模板（7 个；/scenarios 与 AI 推荐的兜底基线）
+    assistant.py       本地 AI 助手（rules / ollama 双模式，只吃字段名与计数）
     core/
       config.py        Settings（环境变量，frozen dataclass + lru_cache）
-      db.py            sqlite3 封装：tasks/findings/audit_log/rules/user_prefs 五张表 + 写锁 + WAL
-    parsers/           输入分段：text/json/csv/sql/docx/pdf + registry 统一入口（PDF 依赖可选 pdfplumber）
+      db.py            sqlite3 封装：tasks/findings/alerts/audit_log/rules/user_prefs 六张表 + 写锁 + WAL
+    parsers/           输入分段：text/json/csv/sql/docx/xlsx/pdf + image（OCR，可选）+ registry 统一入口（PDF 依赖可选 pdfplumber；docx/xlsx 零依赖自研）
     webui/
       index.html       自带单页界面：上传/粘贴 → 左原文高亮 / 右脱敏副本（无需前端工具链）
     identify/
       rules.py         L1 规则表（含校验算法、可启停）
       scoring.py       评分公式与阈值
-      masking.py       四级脱敏模板
+      masking.py       四级脱敏模板 + 6 种导出策略（block/partial/hash/generalize/pseudonym/encrypt）
       types.py         Level/EntityType/Hit/Result 等基础类型
       l2.py            BERT 语义识别客户端（HTTP 契约 + 降级）
       l3.py            L3 客户端：调 `l3_service`（http）或直连 Ollama（ollama）
@@ -465,12 +510,13 @@ server/
     tasks/
       service.py       后台任务执行、findings 落库、逐条写审计
       export.py        jsonl/json/csv/sql 导出
+      document_export.py  按脱敏策略重建真实文件（txt/json/csv/sql/docx/xlsx；pdf→txt）
     audit/
       chain.py         HMAC 哈希链：追加、查询、校验
     api/
       deps.py          鉴权、操作人、流水线单例
       schemas.py       请求/响应模型
-      routes_*.py      health/detect/tasks/findings/stats/rules/audit/dynamic/traffic/preferences
+      routes_*.py      health/detect/tasks/findings/stats/rules/audit/dynamic/traffic/preferences/alerts/assistant
     traffic/
       pcap.py          pcap/pcapng 解析、write_pcap
       frames.py        以太网/IP/TCP/UDP → Frame（载荷定位）
@@ -480,10 +526,11 @@ server/
   l2_service/          L2 语义推理服务（mock / onnx 后端 + /v1/classify）
   l2_training/         自举数据集、弱标注、微调脚本
 l3_training/         L3 指令微调：金标→指令样本、LoRA 训练、权重合并
+l3_training/         L3 指令微调：金标→指令样本、LoRA 训练、权重合并
   l3_service/          L3 推理服务（mock / hf / instruct 后端 + /v1/judge”）
   samples/             自带示例抓包生成脚本与 demo-traffic.pcap
   eval/                评测集（351 条主集 + 200 条 NER 压力集）与评测说明
-  tests/               443 个用例：识别、解析（含 Word/PDF/图片 OCR）、管线、审计、API、界面、动态脱敏、场景模式、导出策略、L2/L3 服务、训练侧、评测（数据集需本地生成）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本
+  tests/               630 个用例：识别、解析（含 Word/PDF/Excel）、管线、审计、API、界面、动态脱敏、L2/L3 服务、训练侧、评测（含数据集完整性）、流量导入、实时旁路（pcap/pcapng）、NER 探针、地名库、敏感词表、批量检测、部署脚本、离线验签、分级告警、插件注册表、长文本性能、前端与脚本静态回归、桌面打包配置（图标/托盘/安装包）、网页端快捷方式
   pyproject.toml
   requirements.txt     运行依赖（固定版本）
   requirements-ml.txt  可选：L2/L3/NER/训练与导出
@@ -509,8 +556,11 @@ web/                   正式前端（Vue3 + Element Plus + ECharts，Vite 构�
 1. **原文不落库**：库里只存 `input_hash`（原文 SHA-256）、脱敏副本与哈希链字段；检索比对靠哈希，泄露风险最低。
 2. **分级识别按成本升级**：L1 微秒~毫秒级全量跑；只有 L1 命中且分数落在 0.25~0.85 灰区的样本才送 L3 复核；L3 只在 `Unsafe` 时升级，`Controversial/Safe` 只记理由，避免小模型把低危抬成中危。L2/L3 均可在配置里关掉，关掉即「纯规则模式」，链路不阻塞。
 3. **失败即降级**：L2/L3 超时或不可用 → 保留 L1 结论并置 `degraded=true`，不让模型成为单点故障。
-4. **可复算可审计**：每条 finding 带 `rule_ids`、`confidence_vector`、`model_chain`、`reasons`；审计日志与 finding 一一对应，`prev_hash` 串成链，任何字段改动都会在 `/audit/verify` 暴露。
+4. **可复算可审计**：每条 finding 带 `rule_ids`、`confidence_vector`、`model_chain`、`reasons`；审计日志与 finding 一一对应，`prev_hash` 串成链，任何字段改动都会在 `/audit/verify` 暴露；签名覆盖 `prev_hash`，且完整链要求首条记录 `id=1`，删掉链头再把新首条 `prev_hash` 改成 genesis 也会被识别。
 5. **模块化便于扩展**：解析器、识别器、算子、导出格式都是小函数/协议 + 注册表，新增格式或模型不需改主流程。
+6. **导出可离线验签**：`/audit/export` 的 jsonl/json/csv 自带 `prev_hash` 与 `signature`，用 `python -m scripts.verify_export <文件>` 在任意机器复算整条哈希链（不连数据库、不起服务，密钥用 `--secret` 或 `FLOWMASK_AUDIT_SECRET`），断链会报出 `broken_at` 与原因；接口默认只导最近 200 条（脚本会把这种情况标为「部分链」，加 `--require-genesis` 则直接判失败），传 `after_id=0` 起按 `limit` 游标分页可导出完整链，响应头 `X-FlowMask-Audit-Next-After-Id` 给下一页游标、到链尾时缺省；响应头 `X-FlowMask-Audit-Head` 是本页链尾哈希锚点，调用方可另存用于发现「尾部整段被删」，空导出文件不再算通过。
+7. **检测 → 告警 → 处置闭环**：任务落库 findings 的同时按级别生成告警（L3 紧急 / L2 重要 / L1 提示，阈值 `FLOWMASK_ALERT_MIN_LEVEL` 可调），每条告警带与四级脱敏模板同口径的处置建议；`/alerts` 支持过滤、汇总与认领/忽略，处理人与备注留痕。
+8. **扩展点有登记处**：`app/plugins.py` 把引擎（L1/L2/L3/NER）、隐私算子、解析器统一登记，`GET /plugins` 可查内置清单与就绪状态；第三方插件以 `FLOWMASK_PLUGINS=module:register` 在启动时接入，加载失败只记 `warnings`、不影响主链路——「可扩展」而不是「可被插件拖垮」。
 
 ## 11. 性能基准（本机实测）
 
@@ -523,7 +573,7 @@ python -m bench --l3-endpoint http://127.0.0.1:8092/v1/judge --markdown-out ../d
 
 | 链路 | 单条均值 | P95 | 吞吐 | 口径 |
 | --- | ---: | ---: | ---: | --- |
-| L1 规则识别 + 评分分级 | **0.022 ms** | 0.023 ms | ≈4.4 万条/秒 | 纯 Go 等价物在 Python 侧，无网络/模型 |
+| L1 规则识别（17 条规则 + 评分分级） | **0.022 ms** | 0.023 ms | ≈4.4 万条/秒 | 纯 Go 等价物在 Python 侧，无网络/模型 |
 | 端到端 `POST /api/v1/detect` | **2.18 ms** | 2.42 ms | ≈459 请求/秒 | 进程内 HTTP（`TestClient`，不含浏览器开销） |
 | L2 ONNX int8（batch=1 → 32） | 7.38 → **4.09 ms**/条 | 4.19 ms | ≈244 条/秒 | CPU 推理；批越大单条越便宜 |
 | L3 指令裁判（Qwen2.5-1.5B） | **1.16 s** | 1.26 s | 0.86 条/秒 | RTX 5060 Laptop 8GB / CUDA，回环 HTTP |
@@ -626,6 +676,10 @@ powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
 模型权重**不打进 exe**（这是体积能压到 50 MB 的原因）：把 `l2_models/`、`models/` 放到 **exe 同级目录**即可被自动识别；
 没有权重也能启动，链路自动降级为 L1-only（`degraded=true`）。
 
+打包会一并带上 **L1 三级敏感词表**（`app/identify/knowledge/*.yaml`，法规/行业/企业共 66 词）；
+构建后跑 `FlowMask.exe --self-check` 或看 `/api/v1/health` 的 `keywords` 字段（应为 66）即可确认词表已进包
+——漏打包不会报错，只会静默变成空词表，所以 `server/tests/test_desktop.py` 有静态回归盯着两份 spec。
+
 在桌面放双击入口（「启动」和「停止」两个快捷方式）：
 
 ```powershell
@@ -639,6 +693,18 @@ powershell -ExecutionPolicy Bypass -File scripts\create_shortcut.ps1 -Mode stop 
 再用 `start` 脱离控制台，所以黑框一闪即关；停止脚本内部是 `FlowMask.exe --stop`。
 这样每条链路都能在命令行里原样复现，排查时不用猜「双击到底执行了什么」。
 也可以不走快捷方式，直接双击 `dist_exe\FlowMask.exe`（它自己会挑端口、开窗口）。
+
+只想打开**网页端**（不需要 exe）时，用同一个脚本生成网页端入口：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\create_shortcut.ps1 -Mode web
+# → 桌面「FlowMask 网页端」
+```
+
+双击后由 `scripts\open_web.ps1` 负责：已在运行就直接打开 `http://127.0.0.1:8090/app/`；
+没在运行会**后台拉起服务**（`start_local.cmd -Port 8090 -NoBrowser`，隐藏窗口）再打开浏览器，
+启动超时或浏览器打不开会弹窗提示并提供可复制地址。`--NoStart` 只提示不动手，`--DryRun` 只打印将执行的步骤；
+过程日志写到 `server\logs\open_web.log`，排查时先看这里。
 
 停止有两条路，都不需要去找进程管理器：
 
@@ -656,11 +722,38 @@ powershell -ExecutionPolicy Bypass -File scripts\create_shortcut.ps1 -Mode stop 
 已知边界：exe 只跑**主服务**；L2/L3/NER 的 torch/onnxruntime 推理仍以 Python 进程单独启动（`python -m l2_service`），
 以免把 CUDA/驱动版本耦合进 exe。打包用 PyInstaller（`flowmask.spec`），**不需要** Rust/Node 运行时。
 
+#### 图标、系统托盘与安装包（可选增强，更接近桌面应用）
+
+- **应用图标**：`assets/flowmask.ico`（16/24/32/48/64/128/256 七尺寸）+ `assets/flowmask-128.png`，
+  由 `scripts/make_icon.py`（Pillow）从同一套设计生成；`flowmask.spec` 的 `EXE(icon=..., version=assets/flowmask_version.txt)`
+  会把图标和 Windows 版本资源（FileVersion 0.26.0.0 / ProductName FlowMask）嵌进 exe。
+  网页端 favicon 用同一张图（`web/public/favicon.ico` → `/app/favicon.ico`）。
+  图标文件由测试盯着：`tests/test_assets.py` 校验 ICO 魔数与 favicon 一致，`tests/test_desktop.py` 校验版本资源与 `app.__version__` 对齐。
+- **系统托盘**（exe 双击版默认开启）：关窗口后服务继续驻留，右键托盘图标可「打开 FlowMask / 打开数据目录 / 退出 FlowMask」；
+  `--tray` 强制开、`--no-tray` 关闭。托盘依赖是可选的（`requirements-desktop.txt` 里的 `pystray` + `pillow`），
+  没装或当前会话无法创建托盘窗口时**自动降级**并打印「托盘未能显示（不影响主服务）：…」，不会影响 Web 服务本身。
+- **安装包**：`scripts\build_installer.ps1`（可加 `-SkipBuild` 复用已构建 exe）会先跑 `build_exe.ps1`，再用 Inno Setup
+  （`installer\FlowMask.iss`，当前用户级安装、无需管理员）编译 `dist_install\FlowMask-Setup-0.26.0.exe`，
+  并顺带打包便携版 `FlowMask-Portable-0.26.0.zip`。脚本会自动在 PATH 与 `%LOCALAPPDATA%\Programs\Inno Setup 6` 找 `ISCC.exe`，
+  找不到会提示 `winget install --id JRSoftware.InnoSetup -e` 后退出（exit 2）。
+  安装目录默认 `%LOCALAPPDATA%\Programs\FlowMask`，带开始菜单/可选桌面快捷方式、卸载入口和 `使用说明.txt`；
+  权重（`l2_models/`、`models/`）仍按「放在 exe 同级」的约定外置，安装包不含权重。
+  `dist_exe/`、`dist_install/` 都是可重建产物，已在 `.gitignore` 中忽略，不入库。
+
+```powershell
+# 只重打 exe（含图标/托盘）
+powershell -ExecutionPolicy Bypass -File scripts\build_exe.ps1
+# 打安装包 + 便携 zip（复用刚构建的 exe）
+powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1 -SkipBuild
+```
+
 ### 12.7 一键演示（答辩 / 评审现场）
 
 `server/scripts/demo.ps1`（Windows）与 `demo.sh`（Linux/macOS）只调用 HTTP 接口、不依赖 Python 依赖，
-按「健康检查 → 即时检测 → 任务 + 审计 → pcap 流量 → 批量检测 → 动态脱敏 → 隐私增强导出 → 审计校验 → 看板」
-的顺序跑一遍，逐项打印 `[OK]/[FAIL]`，末尾给出退出码（0 = 全通过）。
+按「健康检查 → 即时检测 → 任务 + 审计 → pcap 流量 → 批量检测 → 文件检测 + Export（Excel xlsx）→ 动态脱敏 → 隐私增强导出 → 审计校验 → 看板」
+的顺序跑一遍，逐项打印 `[OK]/[FAIL]`，末尾给出退出码（0 = 全通过）。Excel 步骤用 `samples/demo-sheet.xlsx`
+（可用 `python -m samples.make_demo_xlsx` 重新生成）：先上传看分级，再走 `POST /detect/file/export` 拿回真脱敏的 xlsx
+并解包校验「表头保留、原文手机号已掩码」。
 
 ```powershell
 # 先起服务（或双击桌面 FlowMask.exe），再跑演示
@@ -674,7 +767,7 @@ powershell -ExecutionPolicy Bypass -File scripts\demo.ps1 -BaseUrl http://127.0.
 常用参数：`-BaseUrl`、`-NoBrowser`、`-SkipTraffic`（没有 `samples/demo-traffic.pcap` 时跳过流量步骤）。
 脚本会用 `curl.exe` 传 pcap 与批量文件，临时文件写在系统临时目录并在结束时自动清理。
 
-**换机验证口径**：演示脚本不假设库里有旧数据，用**全新 `FLOWMASK_DATA_DIR` + 空库**跑通全部 8 步
+**换机验证口径**：演示脚本不假设库里有旧数据，用**全新 `FLOWMASK_DATA_DIR` + 空库**跑通全部 9 步
 （本机实测：3 个会话 pcap 导入、批量 3 文件、审计链 11 条 `ok=true`、隐私导出 `total=1` 且
 `l_diversity.ok=false`（单条任务必然不足 `l`，符合定义））——即「新机器上只装依赖 + 起服务」就能复现。
 

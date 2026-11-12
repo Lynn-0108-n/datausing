@@ -70,6 +70,7 @@ server/_l3_*.json
 
 # 桌面 exe 打包产物（PyInstaller，体积大且可重建）
 server/dist_exe/
+server/dist_install/
 server/build_exe/
 server/dist_dbg/
 server/build_dbg/
@@ -83,5 +84,5 @@ server/logs/
 .flowmask-tmp/
 server/.flowmask-tmp/
 
-# 测试文件（仅本地使用，不入库）
-测试文件/
+# 前端本机验证缓存
+/web/.qa/

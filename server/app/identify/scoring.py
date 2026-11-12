@@ -21,7 +21,7 @@ from __future__ import annotations
 from .decode import decode_enabled_by_default, decoded_hits
 from .keywords import keyword_hits, keywords_enabled_by_default
 from .gazetteer import gazetteer_enabled_by_default, gazetteer_hits
-from .rules import dedupe_overlaps, detect, extend_address_hits
+from .rules import dedupe_overlaps, detect
 from .types import EntityType, Hit, Level, Result
 
 THRESHOLD_HIGH = 0.85
@@ -146,6 +146,4 @@ def analyze(
 
     if extras:
         hits = dedupe_overlaps(hits + extras)
-    # 地址补到街道/门牌：行政区命中后再吸收紧随的「路/街 + 门牌」
-    hits = dedupe_overlaps(extend_address_hits(text, hits))
     return score(hits)

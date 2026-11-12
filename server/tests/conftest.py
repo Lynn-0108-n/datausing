@@ -15,19 +15,20 @@ def tmp_env(tmp_path, monkeypatch):
     monkeypatch.setenv("FLOWMASK_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("FLOWMASK_DB_PATH", str(tmp_path / "data" / "flowmask.db"))
     monkeypatch.delenv("FLOWMASK_API_TOKEN", raising=False)
-    # .env 里开启的 OCR/NER 等会污染测试默认状态，每个用例恢复"未配置"
-    monkeypatch.delenv("FLOWMASK_OCR_ENABLED", raising=False)
 
     from app.api.deps import reset_pipeline_for_tests
     from app.core.config import get_settings
     from app.core.db import reset_database_for_tests
     from app.identify.rules import set_active_rules
+    from app.identify.snapshots import get_snapshot_store
 
     get_settings.cache_clear()
     reset_database_for_tests()
     reset_pipeline_for_tests()
     set_active_rules(None)
+    get_snapshot_store().clear()
     yield
+    get_snapshot_store().clear()
     get_settings.cache_clear()
     reset_database_for_tests()
     reset_pipeline_for_tests()

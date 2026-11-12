@@ -1,69 +1,83 @@
-"""AI 助手路由：统计解读 + 方案推荐。
+"""本地 AI 助手与使用场景模板接口。
 
-设计要点：
-- **入参用 ``dict = Body(...)`` 而不是直接声明 Pydantic 模型**：避免 FastAPI 把
-  ``ValidationError`` 直接转成 422 并回显 ``exc.errors()``（含字段路径，可能泄露请求结构）；
-- **手动 ``model_validate`` + 捕获 ValidationError**：返回 **400** + 固定文案
-  「请求格式不正确」，不拼接错误详情；
-- **只接收聚合计数 / 用途标签**：路由层不接触原文 / masked / path，从源头杜绝泄露。
+端点分工：
+
+- ``GET  /assistant/health``  助手是否可用（rules 模式恒可用，ollama 模式探测本机服务）
+- ``GET  /assistant/models``  本机模型列表（ollama /api/tags）
+- ``POST /assistant/suggest`` 按场景/字段名/计数推荐脱敏方案（输入不含敏感值）
+- ``POST /assistant/advise``  按聚合统计生成风险研判
+- ``GET  /scenarios``         场景模板清单（设置页与检测页共用）
+
+所有端点都不落库、不改状态；ollama 不可用时 Assistant 内部自动回退本地规则，
+接口仍返回 200，避免本机模型服务把检测页拖垮。
+
+路由约定：本模块的 ``router`` 不带前缀，和 ``routes_detect`` 等现有模块保持一致；
+main.py 应把它纳入现有的 ``APIRouter(prefix="/api/v1", dependencies=[...])``
+外层路由（同一个 include_router 循环），这样 /api/v1 前缀、鉴权依赖只保留一份。
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
-from pydantic import ValidationError
+from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..assistant import advise, recommend
+from ..assistant import Assistant
 from ..core.config import Settings
+from ..scenarios import get_scenario, list_scenarios, scenario_to_out
 from .deps import settings_dep
-from .schemas import AssistantAdviseIn, AssistantAdviseOut, RecommendIn, RecommendOut
+from .schemas import (
+    AssistantAdviseIn,
+    AssistantAdviseOut,
+    AssistantHealthOut,
+    AssistantModelsOut,
+    AssistantSuggestionOut,
+    AssistantSuggestIn,
+    ScenarioOut,
+    ScenariosOut,
+)
 
 router = APIRouter(tags=["assistant"])
 
 
-@router.post(
-    "/assistant/advise",
-    response_model=AssistantAdviseOut,
-    summary="AI 解读：聚合计数",
-)
+def _build_assistant(settings: Settings) -> Assistant:
+    """按请求构造助手；构造不联网，健康检查/模型列表也只是短超时探测。"""
+    return Assistant(settings)
+
+
+@router.get("/assistant/health", response_model=AssistantHealthOut, summary="本地 AI 助手状态")
+def assistant_health(settings: Settings = Depends(settings_dep)) -> AssistantHealthOut:
+    return AssistantHealthOut(**_build_assistant(settings).health())
+
+
+@router.get("/assistant/models", response_model=AssistantModelsOut, summary="本机模型列表")
+def assistant_models(settings: Settings = Depends(settings_dep)) -> AssistantModelsOut:
+    return AssistantModelsOut(**_build_assistant(settings).models())
+
+
+@router.post("/assistant/suggest", response_model=AssistantSuggestionOut, summary="推荐脱敏方案")
+def assistant_suggest(
+    payload: AssistantSuggestIn,
+    settings: Settings = Depends(settings_dep),
+) -> AssistantSuggestionOut:
+    """未知场景直接 400：让前端把场景键拼错的问题暴露在开发期，而不是静默套默认值。"""
+    if payload.scenario and get_scenario(payload.scenario) is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="未知场景")
+    suggestion = _build_assistant(settings).suggest(payload.model_dump())
+    return AssistantSuggestionOut(**suggestion)
+
+
+@router.post("/assistant/advise", response_model=AssistantAdviseOut, summary="风险研判")
 def assistant_advise(
-    payload: dict = Body(...),
+    payload: AssistantAdviseIn,
     settings: Settings = Depends(settings_dep),
 ) -> AssistantAdviseOut:
-    """统计解读：输入聚合计数 → 输出总体评估 + 建议。
-
-    只接收聚合计数与类别分布，**不接收原文 / masked / path**；
-    默认走规则引擎，配置 ``ASSISTANT_MODE=ollama``（仅限本机回环）后可启用模型增强。
-    """
-    try:
-        parsed = AssistantAdviseIn.model_validate(payload)
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="请求格式不正确",
-        ) from exc
-    return advise(parsed, settings)
+    advice = _build_assistant(settings).advise(payload.model_dump())
+    return AssistantAdviseOut(**advice)
 
 
-@router.post(
-    "/assistant/recommend",
-    response_model=RecommendOut,
-    summary="AI 推荐脱敏方案",
-)
-def assistant_recommend(
-    payload: dict = Body(...),
-    settings: Settings = Depends(settings_dep),
-) -> RecommendOut:
-    """方案推荐：输入用途 + 输出要求 → 输出推荐策略 + 理由。
-
-    纯规则引擎匹配（写死的推荐表），不调模型；
-    输入只含用途标签与要求标签，不含任何原文。
-    """
-    try:
-        parsed = RecommendIn.model_validate(payload)
-    except ValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="请求格式不正确",
-        ) from exc
-    return recommend(parsed, settings)
+@router.get("/scenarios", response_model=ScenariosOut, summary="使用场景模板")
+def scenarios() -> ScenariosOut:
+    items = list_scenarios()
+    return ScenariosOut(
+        scenarios=[ScenarioOut(**scenario_to_out(item)) for item in items],
+        total=len(items),
+    )

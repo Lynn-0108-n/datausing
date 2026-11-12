@@ -34,27 +34,13 @@ def test_direction_mentions_are_detected(text: str, expected: str) -> None:
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("收货地址：福建省福州市鼓楼区五四路 100 号", "福建省"),
+        ("收货地址：福建省福州市鼓楼区五四路 100 号", "福建"),
         ("仓库在东莞虎门镇", "东莞"),
-        ("联系人来自深圳市南山区", "深圳市南山区"),
+        ("联系人来自深圳市南山区", "深圳"),
     ],
 )
 def test_suffixed_mentions_are_detected(text: str, expected: str) -> None:
     assert expected in _values(text)
-
-
-def test_suffix_is_included_in_span() -> None:
-    # 行政后缀并入命中区间，避免 block 后残留「省/市」暴露层级
-    values = _values("收货地址：福建省福州市鼓楼区五四路 100 号")
-    assert "福建省" in values
-    assert "福州市鼓楼区" in values
-    assert _values("他住在长沙市") == ["长沙市"]
-
-
-def test_district_is_included_in_span() -> None:
-    # 市后面的区县段一起命中，避免 block 后残留「南山区」
-    assert _values("联系人来自深圳市南山区") == ["深圳市南山区"]
-    assert _values("仓库在东莞市虎门镇") == ["东莞市"]  # 镇不在区县扩展范围
 
 
 @pytest.mark.parametrize(

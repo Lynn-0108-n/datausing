@@ -15,6 +15,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 
+from ..alerts import alerts_for_tasks
 from ..core.config import Settings
 from ..core.paths import resource_root
 from ..core.db import Database
@@ -23,7 +24,7 @@ from ..parsers.base import Document, Segment
 from ..tasks.service import create_task
 from ..traffic import PcapError, TrafficParseError, build_document
 from ..traffic.live import LiveError, LiveStats, get_live_manager
-from .deps import build_options, db_dep, operator_dep, pipeline_dep, settings_dep
+from .deps import build_options, db_dep, operator_dep, pipeline_dep, read_upload_limited, reject_safe_mask_level, settings_dep
 from .schemas import (
     LiveListOut,
     LiveOut,
@@ -71,8 +72,8 @@ def traffic_sample() -> Response:
 )
 async def import_traffic(
     pcap: UploadFile = File(..., description="pcap / pcapng 文件"),
-    enable_l2: bool = False,
-    enable_l3: bool = False,
+    enable_l2: bool | None = None,
+    enable_l3: bool | None = None,
     enable_ner: bool | None = None,
     mask_level: str | None = None,
     min_level: str = "SAFE",
@@ -81,13 +82,8 @@ async def import_traffic(
     pipeline: DetectionPipeline = Depends(pipeline_dep),
     operator=Depends(operator_dep),
 ) -> TrafficImportOut:
-    data = await pcap.read()
-    limit = settings.max_upload_mb * 1024 * 1024
-    if len(data) > limit:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"文件超过上限 {settings.max_upload_mb} MB",
-        )
+    reject_safe_mask_level(mask_level)
+    data = await read_upload_limited(pcap, settings.max_upload_mb * 1024 * 1024)
     if not data:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="文件内容为空")
 
@@ -104,6 +100,7 @@ async def import_traffic(
         ) from exc
 
     options = build_options(
+        settings=settings,
         enable_l2=enable_l2,
         enable_l3=enable_l3,
         enable_ner=settings.enable_ner if enable_ner is None else enable_ner,
@@ -143,6 +140,7 @@ def ingest_traffic(
     pipeline: DetectionPipeline = Depends(pipeline_dep),
     operator=Depends(operator_dep),
 ) -> TrafficIngestOut:
+    reject_safe_mask_level(payload.mask_level)
     segments = [
         Segment(path=item.path, text=item.text, hint=item.hint) for item in payload.segments
     ]
@@ -154,6 +152,7 @@ def ingest_traffic(
         meta={"format": "ingest", "source": payload.source, "segments": len(segments)},
     )
     options = build_options(
+        settings=settings,
         enable_l2=payload.enable_l2,
         enable_ner=settings.enable_ner if payload.enable_ner is None else payload.enable_ner,
         enable_l3=payload.enable_l3,
@@ -179,29 +178,38 @@ def ingest_traffic(
 def _resolve_live_path(raw: str, settings: Settings) -> Path:
     """把请求里的路径限制在数据目录/示例目录内，避免变成任意文件读取。
 
-    相对路径以 ``data/`` 开头时，去掉这一层前缀后按数据目录解析：
-    前端默认值与示例脚本写的都是 ``data/live.pcap``（即 ``<数据目录>/live.pcap``），
-    不能直接拼成 ``<数据目录>/data/live.pcap``，否则跟随到的文件与抓包脚本写的不是同一个。
+    前端与 README 的默认值是 ``data/live.pcap``（相对 server/ 的写法），而
+    ``settings.data_dir`` 本身就是 ``server/data``；直接拼接会多出一层
+    ``server/data/data/live.pcap``，跟随线程安静地读不到任何报文。这里对相对
+    路径做多候选解析：先按「去掉 data/ 前缀」再拼数据目录，然后才退回按
+    server/ 根目录解析（支持 ``samples/demo-traffic.pcap``）。
     """
     candidate = Path(raw)
-    if not candidate.is_absolute():
-        parts = candidate.parts
-        if len(parts) > 1 and parts[0] == "data":
-            candidate = settings.data_dir.joinpath(*parts[1:])
-        else:
-            candidate = settings.data_dir / candidate
-    resolved = candidate.resolve()
-    allowed_roots = [settings.data_dir.resolve(), _SAMPLES_DIR.resolve()]
-    for root in allowed_roots:
-        if resolved == root or root in resolved.parents:
-            return resolved
+    roots = [settings.data_dir.resolve(), _SAMPLES_DIR.resolve()]
+    if candidate.is_absolute():
+        attempts = [candidate]
+    else:
+        normalized = raw.strip().replace("\\", "/")
+        stripped = normalized[len("data/") :] if normalized.startswith("data/") else ""
+        attempts = []
+        if stripped:
+            attempts.append(settings.data_dir / stripped)
+        attempts.append(settings.data_dir / candidate)
+        attempts.append(SERVER_DIR / candidate)
+    for attempt in attempts:
+        resolved = attempt.resolve()
+        for root in roots:
+            if resolved == root or root in resolved.parents:
+                return resolved
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
-        detail="实时跟随时抓包文件必须位于数据目录或其子目录下（如 data/live.pcap）",
+        detail="实时跟随时抓包文件必须位于数据目录或其子目录下（如 data/live.pcap、samples/demo-traffic.pcap）",
     )
 
 
-def _live_out(stats: LiveStats) -> LiveOut:
+def _live_out(stats: LiveStats, db: Database | None = None) -> LiveOut:
+    alerts = alerts_for_tasks(db, stats.task_ids) if db is not None else None
+    last_alert = (alerts or {}).get("last_alert") or {}
     return LiveOut(
         live_id=stats.live_id,
         pcap_path=stats.pcap_path,
@@ -220,13 +228,19 @@ def _live_out(stats: LiveStats) -> LiveOut:
         tasks=stats.tasks,
         last_task_id=stats.last_task_id,
         last_error=stats.last_error,
+        alert_total=int((alerts or {}).get("total", 0)),
+        alert_open=int((alerts or {}).get("open", 0)),
+        alert_by_level=dict((alerts or {}).get("by_level", {})),
+        last_alert_id=last_alert.get("id"),
+        last_alert_title=last_alert.get("title", ""),
+        last_alert_level=last_alert.get("level", ""),
     )
 
 
 @router.get("/traffic/live", response_model=LiveListOut, summary="实时旁路跟随状态")
-def live_list() -> LiveListOut:
+def live_list(db: Database = Depends(db_dep)) -> LiveListOut:
     manager = get_live_manager()
-    return LiveListOut(sessions=[_live_out(item) for item in manager.list()])
+    return LiveListOut(sessions=[_live_out(item, db) for item in manager.list()])
 
 
 @router.post(
@@ -247,6 +261,7 @@ def live_start(
             status_code=status.HTTP_400_BAD_REQUEST, detail="该路径不是文件"
         )
     options = build_options(
+        settings=settings,
         enable_l2=payload.enable_l2,
         enable_l3=payload.enable_l3,
         enable_ner=settings.enable_ner if payload.enable_ner is None else payload.enable_ner,
@@ -270,15 +285,15 @@ def live_start(
             else status.HTTP_400_BAD_REQUEST
         )
         raise HTTPException(status_code=code, detail=str(exc)) from exc
-    return _live_out(stats)
+    return _live_out(stats, db)
 
 
 @router.post("/traffic/live/{live_id}/stop", response_model=LiveOut, summary="停止实时跟随")
-def live_stop(live_id: str) -> LiveOut:
+def live_stop(live_id: str, db: Database = Depends(db_dep)) -> LiveOut:
     stats = get_live_manager().stop(live_id)
     if stats is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="没有这个实时跟随会话")
-    return _live_out(stats)
+    return _live_out(stats, db)
 
 
 @router.delete("/traffic/live", summary="清空已停止的实时跟随记录")

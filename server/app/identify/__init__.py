@@ -1,13 +1,6 @@
 """识别层统一出口：外部只需要 ``from app.identify import ...``。"""
 
-from .masking import (
-    MaskStrategy,
-    mask,
-    mask_by_strategy,
-    mask_hits,
-    mask_text_by_strategy,
-    mask_value,
-)
+from .masking import mask, mask_hits, mask_value
 from .operators import check_l_diversity, generalize_numeric, laplace_noise, perturb_numeric
 from .pipeline import DetectionPipeline, DetectOptions, DocumentReport, SegmentFinding
 from .rules import RULES, detect
@@ -27,7 +20,6 @@ __all__ = [
     "EntityType",
     "Hit",
     "Level",
-    "MaskStrategy",
     "Result",
     "RULES",
     "DetectionPipeline",
@@ -42,9 +34,7 @@ __all__ = [
     "laplace_noise",
     "level_for",
     "mask",
-    "mask_by_strategy",
     "mask_hits",
-    "mask_text_by_strategy",
     "mask_value",
     "parse_entity_type",
     "perturb_numeric",

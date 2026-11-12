@@ -1,0 +1,29 @@
+FlowMask · 分级脱敏与审计溯源（Windows 桌面版）
+==================================================
+
+一、启动
+  双击桌面「FlowMask」快捷方式（或开始菜单里的 FlowMask）。
+  首次启动会在 %LOCALAPPDATA%\FlowMask\data 自动创建数据库与审计密钥，随后自动打开应用窗口。
+
+二、界面
+  - 应用窗口：http://127.0.0.1:8765/app/（端口被占用会自动顺延）
+  - 内置单页：/ui/      接口文档：/docs
+  - 系统托盘：右键托盘图标可「打开 FlowMask / 打开数据目录 / 退出 FlowMask」；
+    关闭浏览器窗口后服务仍在托盘运行，要彻底退出请用托盘菜单「退出 FlowMask」。
+
+三、数据与日志
+  - 数据目录：%LOCALAPPDATA%\FlowMask\data（卸载安装包不会删除这里）
+  - 运行日志：%LOCALAPPDATA%\FlowMask\logs\desktop.log
+  - 停止服务：运行目录里的 FlowMask.exe --stop，或用「卸载/停止」入口
+
+四、可选模型（体积大，不随安装包分发）
+  - L2 语义模型：放到 exe 同级的 l2_models\bert-sens-onnx\，启动时加 --enable-l2
+  - L3 / NER：需另起 python 模型服务（server/models、server/l3_service），见项目 README 第 3/4 章
+  - 本安装包内置的是 L1（规则 + 三级敏感词表 + 脱敏 + 审计链）
+
+五、排障
+  - 双击没反应：命令行执行 FlowMask.exe --self-check，把生成的 FlowMask-selfcheck.txt 发回
+  - 杀毒软件拦截：onefile 单文件 exe 首次解包可能被误报，可加白名单或改用便携版 zip
+
+六、卸载
+  Windows 设置 → 应用 → FlowMask → 卸载；如需彻底清理，再手动删除 %LOCALAPPDATA%\FlowMask。

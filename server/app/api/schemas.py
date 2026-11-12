@@ -9,7 +9,7 @@ import re
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from ..identify import EntityType
 
@@ -19,8 +19,8 @@ class DetectRequest(BaseModel):
 
     text: str = Field(min_length=1, max_length=200_000, description="待检测文本")
     content_type: str = Field(default="text", description="text / json / csv / sql（自动探测）")
-    enable_l2: bool = Field(default=False, description="是否启用 L2 语义识别（需推理服务在线）")
-    enable_l3: bool = Field(default=False, description="是否启用 L3 本地大模型复核（需 Ollama 在线）")
+    enable_l2: bool | None = Field(default=None, description="是否启用 L2 语义识别（需推理服务在线）")
+    enable_l3: bool | None = Field(default=None, description="是否启用 L3 本地大模型复核（需本地推理服务在线）")
     # None = 跟服务端默认（FLOWMASK_ENABLE_NER）；显式 true/false 按本次请求
     enable_ner: bool | None = Field(default=None, description="是否启用 L1.5 实体识别（人名/地址，适合自由文本）")
     enable_keywords: bool | None = Field(default=None, description="是否启用 L1 敏感词表（法规/行业/企业三级知识库）；None=跟随服务端默认（开）")
@@ -28,28 +28,19 @@ class DetectRequest(BaseModel):
     min_level: str = Field(default="SAFE", description="只返回 ≥ 该级别的结果（SAFE/L1/L2/L3）")
 
 
-class DetectExportRequest(BaseModel):
-    """即时检测并导出脱敏文件（文本入口）。
+class TextTaskIn(BaseModel):
+    """提交文本任务请求（会落库，因此有长度上限且不允许 mask_level=SAFE）。"""
 
-    与 DetectRequest 的区别：
-    - 内部固定 min_level=SAFE（覆盖所有命中，不受界面分级过滤影响）；
-    - 新增 strategy 字段选择导出脱敏策略（block/partial/hash/generalize/pseudonym/encrypt）；
-    - 返回的是文件流（Response），不是 JSON。
-    """
-
-    text: str = Field(min_length=1, max_length=200_000, description="待检测文本")
-    strategy: str = Field(default="partial", description="脱敏策略：block/partial/hash/generalize/pseudonym/encrypt")
-    format: str | None = Field(default=None, description="输出格式；空=按自动探测结果（text/json/csv/sql）")
-    preview: bool = Field(default=False, description="true=返回 JSON {masked} 不下载文件，用于左栏实时预览")
-    enable_l2: bool = Field(default=False)
-    enable_l3: bool = Field(default=False)
-    enable_ner: bool | None = Field(default=None)
-    enable_keywords: bool | None = Field(default=None)
-    mask_level: str | None = Field(default=None, description="强制按该级别脱敏；空表示按实际级别")
-
+    text: str = Field(min_length=1, max_length=200_000, description="待检测文本（最长 20 万字符）")
+    enable_l2: bool | None = Field(default=None, description="是否启用 L2 语义识别（需推理服务在线）")
+    enable_l3: bool | None = Field(default=None, description="是否启用 L3 本地大模型复核（需本地推理服务在线）")
+    enable_ner: bool = Field(default=False, description="是否启用 L1.5 实体识别（人名/地址）")
+    mask_level: str | None = Field(default=None, description="强制按该级别脱敏；任务落库不接受 SAFE")
+    min_level: str = Field(default="SAFE", description="只返回 ≥ 该级别的结果（SAFE/L1/L2/L3）")
 
 
 class SpanOut(BaseModel):
+    coverage_types: list[str] = Field(default_factory=list)
     """命中区间：前端据此在原文上高亮（偏移是字符下标，不含敏感值本身）。"""
 
     start: int
@@ -60,6 +51,7 @@ class SpanOut(BaseModel):
 
 
 class SegmentOut(BaseModel):
+    requires_full_mask: bool = False
     path: str = Field(description="片段位置：JSON Path / 列名+行号 / SQL 语句+字面量")
     level: str
     score: float
@@ -67,6 +59,7 @@ class SegmentOut(BaseModel):
     hits: int
     masked: str = Field(description="脱敏副本（不含原文敏感值）")
     model_chain: str = Field(description="实际使用的模型链：l1 / l1>l2 / l1>l2>l3")
+    engine_runs: dict[str, str] = Field(default_factory=dict)
     reason: str | None = None
     degraded: bool = False
     direct: bool = False
@@ -74,6 +67,13 @@ class SegmentOut(BaseModel):
 
 
 class DetectOut(BaseModel):
+    result_id: str | None = None
+    source_fingerprint: str | None = None
+    ruleset_revision: str | None = None
+    policy_version: str | None = None
+    effective_options: dict[str, Any] = Field(default_factory=dict)
+    engine_runs: dict[str, dict[str, int]] = Field(default_factory=dict)
+    coverage: Literal["complete", "partial"] = "complete"
     content_type: str
     segments: int = Field(description="实际检测的片段数")
     findings: list[SegmentOut]
@@ -81,7 +81,6 @@ class DetectOut(BaseModel):
     duration_ms: int
     degraded: bool
     masked_document: dict[str, Any] = Field(description="脱敏后的文档表示，用于左右对照")
-    task_id: str = Field(default="", description="自动创建的检测记录 task_id（空=创建失败，仍返回检测结果）")
 
 
 class TaskCreateOut(BaseModel):
@@ -117,6 +116,9 @@ class FindingOut(BaseModel):
     rule_id: str | None = None
     degraded: bool = False
     created_at: str
+    type_labels: list[str] = Field(default_factory=list, description="类别中文名，顺序与 types 一致")
+    source: str = Field(default="", description="任务来源：文件名或 text")
+    content_type: str = Field(default="", description="任务内容形态：text/json/csv/sql/…")
 
 
 class FindingPage(BaseModel):
@@ -135,11 +137,67 @@ class TaskPage(BaseModel):
 
 class StatsOut(BaseModel):
     total_findings: int
-    tasks: int
+    tasks: int = Field(description="筛选范围内有检测记录的任务数（去重）")
     by_level: dict[str, int] = Field(description="分级分布（饼图）")
-    by_type: list[dict[str, Any]] = Field(description="类别 TopN（柱状图）")
+    by_type: list[dict[str, Any]] = Field(description="类别 TopN：type/label/count/hits/levels")
     score_histogram: dict[str, int] = Field(description="分数直方图")
     task_id: str | None = None
+    total_hits: int = 0
+    tasks_total: int = Field(default=0, description="全库任务总数（兼容旧 tasks 语义）")
+    by_day: list[dict[str, Any]] = Field(default_factory=list, description="按当地日趋势")
+    risk: dict[str, Any] = Field(default_factory=dict, description="告警处置口径的同筛选统计")
+    dimensions: dict[str, Any] = Field(default_factory=dict, description="维度字典（不受筛选影响）")
+    filter: dict[str, Any] = Field(default_factory=dict, description="当前筛选回显")
+
+
+class AlertOut(BaseModel):
+    """一条分级告警（检测结果 → 告警 → 处置）。"""
+
+    id: int
+    task_id: str
+    finding_id: int = Field(description="对应的检测结果 id")
+    level: str = Field(description="检测级别：L3 / L2 / L1")
+    level_label: str = Field(description="级别中文名：高危 / 中危 / 低危")
+    severity: str = Field(description="告警等级：紧急 / 重要 / 提示")
+    types: list[str] = Field(description="英文类别键")
+    type_labels: list[str] = Field(default_factory=list, description="类别中文名，顺序与 types 一致")
+    source: str = Field(default="", description="任务来源：文件名或 text")
+    content_type: str = Field(default="", description="任务内容形态：text/json/csv/sql/…")
+    score: float
+    path: str = Field(description="触发告警的片段位置")
+    title: str
+    suggestion: str = Field(description="脱敏/处置建议（与四级脱敏模板同一口径）")
+    status: str = Field(description="open / ack / ignored")
+    status_label: str = Field(description="待处理 / 已认领 / 已忽略")
+    created_at: str
+    handled_at: str | None = None
+    handled_by: str | None = Field(default=None, description="认领/忽略的操作人")
+    note: str = ""
+
+
+class AlertPage(BaseModel):
+    items: list[AlertOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class AlertSummaryOut(BaseModel):
+    total: int
+    open: int = Field(description="待处理告警数（角标/看板用）")
+    by_level: dict[str, int] = Field(description="按级别分布")
+    by_status: dict[str, int] = Field(description="按状态分布")
+    task_id: str | None = None
+    handled: int = Field(default=0, description="ack + ignored（已接手处置，不代表已完成）")
+    handled_ratio: float = Field(default=0.0, description="handled / total，total=0 时为 0.0")
+    open_by_level: dict[str, int] = Field(default_factory=dict, description="按级别的待处理数")
+
+
+class AlertAckIn(BaseModel):
+    """处理告警：认领（ack）、忽略（ignored）或重置（open）。"""
+
+    status: str = Field(default="ack", description="ack / ignored / open")
+    note: str = Field(default="", max_length=200, description="处理备注")
 
 
 class RuleOut(BaseModel):
@@ -157,13 +215,14 @@ class RuleOut(BaseModel):
 class RuleIn(BaseModel):
     """自定义规则（正则 + 类别 + 权重）。"""
 
-    # 前端只填规则名，id 留空时由服务端生成（见 routes_rules.create_rule）
+    # 前端「新增规则」表单没有 ID 输入项，省略时由服务端生成（custom_xxxxxxxx）；
+    # 保留显式传入的能力（脚本/API 用户希望固定 ID 时）。
     id: str | None = Field(
         default=None,
         min_length=2,
         max_length=32,
         pattern=r"^[a-z0-9_]+$",
-        description="规则 id（小写字母/数字/下划线）；留空按规则名生成，不符合规则时用 custom_ 前缀",
+        description="规则 ID；省略时自动生成",
     )
     name: str = Field(min_length=1, max_length=64)
     type: str
@@ -184,9 +243,13 @@ class RuleIn(BaseModel):
     @classmethod
     def _valid_pattern(cls, value: str) -> str:
         try:
-            re.compile(value)
+            compiled = re.compile(value)
         except re.error as exc:
             raise ValueError(f"正则表达式非法: {exc}") from exc
+        # 捕获组用于定位「要脱敏的片段」；没有捕获组时 match.group(1) 会抛
+        # IndexError，把整条检测链路打成 500，所以创建入口就要拦住。
+        if compiled.groups < 1:
+            raise ValueError("正则至少要有一个捕获组，用 (...) 包住要脱敏的内容")
         return value
 
 
@@ -220,6 +283,7 @@ class VerifyOut(BaseModel):
     broken_at: int | None = None
     reason: str = ""
     head_hash: str
+    legacy_rows: int = Field(default=0, description="使用旧签名方案（未覆盖 prev_hash）的记录数")
 
 
 class KeywordTermOut(BaseModel):
@@ -253,13 +317,14 @@ class HealthOut(BaseModel):
     # L1.5 是否可用（模型加载成功），供前端决定是否显示「自由文本模式」
     ner: bool = False
     ner_backend: str = ""
-    # OCR 图片识别是否启用（Day 3.4 新增）
+    # 图片 OCR 是否可用（需要可选依赖 requirements-ocr.txt，默认关闭）
     ocr: bool = False
-    ocr_engine: str = ""
-    # AI 助手模式（Day 3.4 新增）：off / ollama
-    assistant_mode: str = "off"
+    ocr_backend: str = ""
+    # 本地 AI 助手是否可用（默认 rules 模式，不需要模型）
+    assistant: bool = False
     assistant_model: str = ""
     uptime_s: int
+
 
 class DynamicRenderIn(BaseModel):
     """动态脱敏渲染请求：同一段文本，按是否授权返回两种视图。"""
@@ -324,8 +389,8 @@ class TrafficIngestIn(BaseModel):
     source: str = Field(default="agent", max_length=128, description="采集来源标识（会写进任务 source）")
     content_type: str = Field(default="ingest", max_length=32)
     segments: list[IngestSegmentIn] = Field(min_length=1, max_length=200)
-    enable_l2: bool = Field(default=False)
-    enable_l3: bool = Field(default=False)
+    enable_l2: bool | None = Field(default=None)
+    enable_l3: bool | None = Field(default=None)
     enable_ner: bool | None = Field(default=None)
     mask_level: str | None = Field(default=None)
     min_level: str = Field(default="SAFE")
@@ -350,8 +415,8 @@ class LiveStartIn(BaseModel):
     )
     interval_ms: int = Field(default=500, ge=100, le=10_000, description="轮询间隔（毫秒）")
     window_s: float = Field(default=2.0, ge=0.2, le=60.0, description="聚合窗口：每窗口生成一个任务")
-    enable_l2: bool = False
-    enable_l3: bool = False
+    enable_l2: bool | None = None
+    enable_l3: bool | None = None
     # None 表示“跟服务端默认走”（FLOWMASK_ENABLE_NER）；显式 true/false 则按本次请求
     enable_ner: bool | None = None
     mask_level: str | None = None
@@ -374,6 +439,13 @@ class LiveOut(BaseModel):
     tasks: int
     last_task_id: str | None = None
     last_error: str = ""
+    # 告警联动：本会话各窗口任务自动生成的告警聚合（明细走 /alerts?task_id=...）
+    alert_total: int = 0
+    alert_open: int = 0
+    alert_by_level: dict[str, int] = Field(default_factory=dict)
+    last_alert_id: int | None = None
+    last_alert_title: str = ""
+    last_alert_level: str = ""
 
 
 class LiveListOut(BaseModel):
@@ -421,86 +493,142 @@ class PreferenceUsersOut(BaseModel):
     total: int = 0
 
 
-# ---------- AI 助手（Day 2.6 新增）----------
-#
-# 设计原则：**只接收聚合计数 / 用途标签，绝不接收原文 / masked / path**。
-# 模型增强仅限本机 Ollama 回环，数据不出机。
+# --------------------------------------------------------------------------
+# 第一次优化：脱敏策略 / 场景模板 / 脱敏文件导出 / AI 助手
+# （契约先落在这里，实现分别在 identify/masking.py、scenarios.py、assistant.py、
+#   tasks/document_export.py、api/routes_detect.py、api/routes_assistant.py）
+# --------------------------------------------------------------------------
 
 
-class TypeCountIn(BaseModel):
-    """单类别的聚合计数（解读接口入参）。"""
+class MaskStrategyOut(BaseModel):
+    """一种脱敏策略：前端下拉框与说明文案都从这里取，避免前后端各写一份。"""
 
-    model_config = ConfigDict(extra="forbid")
-    type: str = Field(min_length=1, max_length=32, description="类别键：id_card / phone / ...")
-    key: str = Field(default="", max_length=32, description="可选的细分键（如命中的规则名）")
-    count: int = Field(ge=0, le=10_000_000)
-
-
-class AssistantAdviseIn(BaseModel):
-    """统计解读入参：聚合计数，不含原文。
-
-    - ``page``：调用来源（stats 看板 / detect 内容检测页），用于调整建议侧重；
-    - ``by_level``：级别 → 命中数；
-    - ``types``：按类别聚合的命中明细（可选）。
-    """
-
-    model_config = ConfigDict(extra="forbid")
-    page: Literal["stats", "detect"] = Field(description="调用来源：stats 看板 / detect 内容检测页")
-    scope: str = Field(default="all", max_length=64, description="范围标签（如时间窗/任务名），原样回显")
-    total: int = Field(ge=0, le=10_000_000, description="检测的片段总数")
-    by_level: dict[str, int] = Field(default_factory=dict, description="级别 → 命中数")
-    types: list[TypeCountIn] = Field(default_factory=list, max_length=20)
-
-
-class AdviceItem(BaseModel):
-    """一条建议：标题 + 详情 + 行动按钮文案。"""
-
-    title: str
-    detail: str
-    action: str = Field(default="", description="可选的行动按钮文案（如「前往识别规则」）")
-
-
-class AssistantAdviseOut(BaseModel):
-    """统计解读响应。"""
-
-    summary: str = Field(description="总体一句话评估")
-    tips: list[AdviceItem] = Field(default_factory=list)
-    severity: Literal["info", "warn", "high"] = Field(description="风险等级")
-    source: Literal["rules", "local-model"] = Field(
-        description="结论来源：规则引擎 / 本机模型"
+    key: str
+    label: str
+    description: str
+    reversible: bool = Field(default=False, description="是否可通过服务端密钥/映射还原")
+    examples: list[dict[str, str]] = Field(
+        default_factory=list, description="示例：category / raw / masked（示例值均为虚构）"
     )
-    degraded: bool = Field(default=False, description="模型调用失败回退规则引擎时为 true")
-    model: str = Field(default="", description="实际使用的模型名（规则引擎为空）")
-    generated_at: str = Field(description="ISO 时间戳")
 
 
-class RecommendIn(BaseModel):
-    """方案推荐入参：用户用途 + 输出要求，不含任何原文。
+class MaskStrategiesOut(BaseModel):
+    strategies: list[MaskStrategyOut]
+    default: str = "partial"
 
-    - ``purpose``：用途枚举（开发测试/教学演示/外包交付/数据分析/公开共享/其他）；
-    - ``requirements``：输出要求标签列表（keep-statistics/reversible/format-preserving/
-      irreversible/audit），不强制枚举，给前端扩展空间；
-    - ``note``：可选备注（限长 500）。
-    """
 
-    model_config = ConfigDict(extra="forbid")
-    purpose: Literal["dev-test", "teaching", "outsourcing", "analysis", "public-sharing", "other"]
-    requirements: list[str] = Field(
-        default_factory=list,
-        description="输出要求：keep-statistics/reversible/format-preserving/irreversible/audit",
+class ScenarioOut(BaseModel):
+    """使用场景模板：一次选好"脱敏到什么程度、用什么策略、要不要开 L2/L3/NER"。"""
+
+    key: str
+    label: str
+    description: str
+    content_types: list[str] = Field(default_factory=list, description="适用数据形态：text/json/csv/sql/image")
+    strategy: str
+    mask_level: str = Field(description="强制脱敏级别：L3/L2/L1")
+    min_level: str = Field(default="SAFE", description="返回/显示的最低级别")
+    enable_l2: bool = False
+    enable_l3: bool = False
+    enable_ner: bool = False
+    retention: str = Field(default="", description="数据保留/流转说明")
+
+
+class ScenariosOut(BaseModel):
+    scenarios: list[ScenarioOut]
+    total: int = 0
+
+
+class DetectExportRequest(BaseModel):
+    """即时脱敏导出：同一请求内用内存里的原文重建文件，原文不落库。"""
+
+    text: str | None = Field(default=None, min_length=1, max_length=200_000, description="旧直接导出原文；快照导出可省略")
+    result_id: str | None = Field(default=None, max_length=128)
+    policy_version: str | None = Field(default=None, max_length=128)
+    content_type: str = Field(
+        default="text",
+        description="原文形态：text / json / csv / sql / docx / xlsx（docx、xlsx 仅上传入口使用）",
     )
-    note: str = Field(default="", max_length=500)
+    strategy: str = Field(
+        default="partial",
+        description="脱敏策略：block / partial / hash / generalize / pseudonym / encrypt",
+    )
+    fmt: str = Field(
+        default="auto",
+        description="输出格式：auto（跟随 content_type）/ txt / json / csv / sql / docx / xlsx",
+    )
+    enable_l2: bool | None = None
+    enable_l3: bool | None = None
+    enable_ner: bool | None = None
+    enable_keywords: bool | None = None
+    min_level: str = Field(default="SAFE", description="只返回 ≥ 该级别的结果（不影响导出内容的完整脱敏）")
 
 
-class RecommendOut(BaseModel):
-    """方案推荐响应。"""
+class DetectDecryptIn(BaseModel):
+    """加密策略导出的还原：只接受本机服务端密钥加密的 ``enc:`` 片段。"""
 
-    strategy: str = Field(description="推荐脱敏策略：block/partial/hash/generalize/pseudonym/encrypt")
-    min_level: str = Field(description="建议的最小返回级别：SAFE/L1/L2/L3")
+    ciphertext: str = Field(min_length=1, max_length=200_000)
+
+
+class DetectDecryptOut(BaseModel):
+    text: str
+    replaced: int = Field(description="还原的密文片段数")
+    strategy: str = "encrypt"
+
+
+class AssistantSuggestIn(BaseModel):
+    """AI 助手推荐脱敏方案的输入：**只传字段名与计数，不传敏感值**。"""
+
+    scenario: str | None = Field(default=None, description="场景键（可选，见 /scenarios）")
+    content_type: str = Field(default="text")
+    fields: list[str] = Field(default_factory=list, max_length=64, description="字段/列名（不含值）")
+    level_counts: dict[str, int] = Field(default_factory=dict, description="各级别命中数")
+    text_length: int = Field(default=0, ge=0, le=1_000_000)
+    prompt: str = Field(default="", max_length=200, description="用途说明（不含敏感值，如“交给学校科研团队分析”）")
+
+
+class AssistantSuggestionOut(BaseModel):
+    strategy: str
+    mask_level: str
+    min_level: str
     enable_l2: bool
     enable_l3: bool
     enable_ner: bool
-    audit_recommended: bool
-    reason: str = Field(description="推荐理由（一句话）")
-    source: Literal["rules", "local-model"]
-    degraded: bool = False
+    retention: str
+    rationale: str
+    source: str = Field(description="rules（本地规则）/ local_llm（本机模型）/ degraded（模型失败回退规则）")
+
+
+class AssistantAdviseIn(BaseModel):
+    """统计看板的风险研判输入：聚合数字，不含原文。"""
+
+    by_level: dict[str, int] = Field(default_factory=dict)
+    by_type: list[dict[str, Any]] = Field(default_factory=list)
+    total_findings: int = 0
+    tasks: int = Field(default=0, description="筛选范围内有检测记录的任务数（不再表示待处理任务数）")
+    scenario: str | None = None
+    scope: str = Field(default="", description="统计范围前缀，如「近 30 天」")
+    total_alerts: int = 0
+    open_alerts: int = 0
+    handled_ratio: float | None = Field(default=None, description="已处置告警占比；None 表示未提供")
+    open_by_level: dict[str, int] = Field(default_factory=dict)
+
+
+class AssistantAdviseOut(BaseModel):
+    summary: str
+    findings: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+    source: str = "rules"
+
+
+class AssistantHealthOut(BaseModel):
+    enabled: bool
+    mode: str
+    model: str
+    available: bool = Field(description="本机模型是否可用；rules 模式下为 True")
+    note: str = ""
+
+
+class AssistantModelsOut(BaseModel):
+    models: list[str] = Field(default_factory=list)
+    endpoint: str = ""
+    note: str = ""

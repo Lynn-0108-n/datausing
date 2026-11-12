@@ -36,6 +36,13 @@ REQUIRED_ENV_KEYS = (
     "FLOWMASK_NER_MODEL_DIR",
     "FLOWMASK_MAX_UPLOAD_MB",
     "FLOWMASK_CORS_ORIGINS",
+    # 第一次优化新增：导出密钥 / OCR / 本地 AI 助手
+    "FLOWMASK_EXPORT_SECRET",
+    "FLOWMASK_OCR_ENABLED",
+    "FLOWMASK_OCR_MAX_SIDE",
+    "FLOWMASK_ASSISTANT_ENABLED",
+    "FLOWMASK_ASSISTANT_MODE",
+    "FLOWMASK_ASSISTANT_MODEL",
 )
 
 _REQUIREMENT_RE = re.compile(r"^(?P<name>[A-Za-z0-9_.\-\[\]]+)==(?P<version>[0-9][^\s;]*)$")

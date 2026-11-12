@@ -58,7 +58,9 @@ $env:FLOWMASK_L3_ENDPOINT = "http://127.0.0.1:8092/v1/judge"
 | `echo` | 固定返回，用于契约测试 |
 | `auto` | 有本地权重走 `hf`，否则回退 `mock` |
 
-模型目录可用 `FLOWMASK_L3_MODEL_DIR` 覆盖，设备用 `FLOWMASK_L3_DEVICE`（`cpu` 默认）。
+模型目录可用 `FLOWMASK_L3_MODEL_DIR` 覆盖；设备由 `FLOWMASK_L3_DEVICE` 控制
+（默认 `auto`：有 CUDA 用 GPU，否则 CPU；显式写 `cuda`/`cuda:0` 但本机无 GPU 时自动回退 CPU 并打日志告警）；
+权重类型由 `FLOWMASK_L3_DTYPE` 控制（`auto` → GPU 用 bf16、CPU 用 fp32）。
 
 ## 输出解析
 
@@ -109,3 +111,20 @@ python -m l3_service                                          # 127.0.0.1:8092
 
 > 是否让 L3 影响最终分级由主服务的策略决定（默认「只升不降 + 封顶 L2」，见 `server/README.md` 第 4 节）；
 > 本服务只负责「给判定 + 给理由」。
+
+## 可选：4B 权重 / GPU 加速（需求 2.9）
+
+默认 0.6B 已够做解释与兜底。若换了显存更大的机器、或想试更大的本机权重，**不用改代码**，
+把模型目录指过去即可（实测 RTX 5060 8GB 可跑 3B/0.6B，4B 建议 bf16）：
+
+```powershell
+$env:FLOWMASK_L3_MODE = "hf"                              # 或 instruct
+$env:FLOWMASK_L3_MODEL_DIR = "models/qwen3guard-gen-4b"   # 任何本地 HF 权重目录
+$env:FLOWMASK_L3_DEVICE = "cuda:0"                        # 无 GPU 会自动回退 CPU 并告警
+$env:FLOWMASK_L3_DTYPE = "bf16"                           # 4B 用 bf16 显存约减半
+python -m l3_service
+```
+
+- `GET /v1/model` 会回显实际 `device` 与 `dtype`，便于确认真的上了 GPU；
+- 实测结论：4B 护栏相对 0.6B/1.5B **判定无收益**，默认仍用 0.6B，本开关只作可选加速/换型演示；
+- 显存不足时 `from_pretrained` 会报 OOM，属运行时限制；`FLOWMASK_L3_DTYPE=bf16` 可先把显存减半再试。

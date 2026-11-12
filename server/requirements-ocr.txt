@@ -1,0 +1,20 @@
+# FlowMask 可选 OCR 依赖（图片解析用；不装也不影响文本/JSON/CSV/SQL/DOCX/PDF 解析）
+#
+# 安装：pip install -r requirements-ocr.txt
+# 启用：设置环境变量 FLOWMASK_OCR_ENABLED=1（默认 0，关闭时不加载模型）
+#
+# 注意：rapidocr-onnxruntime 自带 PP-OCR 模型（默认下载/随包），首次 OCR 会加载
+# onnxruntime，内存与耗时都明显高于文本解析，建议只在需要的机器上安装。
+#
+# 版本：这里只约束大版本，需在目标机器实测识别准确率与耗时后再锁定精确版本。
+rapidocr-onnxruntime>=1.4
+
+# 图片解码与超长边缩放依赖 Pillow（桌面安装包用 requirements-desktop.txt 也会装到它；
+# 单独开 OCR 的机器必须在这里显式安装，否则 parse_image 会报「图片解码需要 Pillow」）
+pillow>=10
+
+# onnxruntime 由 rapidocr-onnxruntime 作为依赖自动安装；如目标机器 CPU 指令集特殊
+# （例如 ARM64 / 无 AVX512），可按平台替换为 onnxruntime 的对应发行版，例如：
+#   onnxruntime>=1.17        # 通用 CPU
+#   onnxruntime-gpu>=1.17    # 有 CUDA 时可用（本项目的本地部署默认不需要）
+# 先装 rapidocr-onnxruntime 让其解析出兼容版本，再按实测结果决定是否手工钉版本。

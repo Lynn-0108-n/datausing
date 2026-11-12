@@ -23,6 +23,7 @@ import struct
 import threading
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -40,6 +41,12 @@ MAX_RECENT_FRAMES = 5000
 MAX_SEGMENTS_PER_WINDOW = 60
 #: 单帧上限（jumbo frame 也够）
 MAX_FRAME_BYTES = 1 << 16
+#: 去重集合上限：长时间跟随同一文件时不能无限增长（FIFO 淘汰最旧的键）
+MAX_SEEN_KEYS = 20_000
+#: 待落库正文上限：识别链路持续失败时也不能无限堆积
+MAX_PENDING_SEGMENTS = 5_000
+#: 单个会话记住的窗口任务数上限：用于按会话聚合告警，长期跟随不能无限增长
+MAX_TRACKED_TASKS = 200
 
 #: pcapng 常量：Section Header Block 的 magic 是字节序无关的回文，
 #: 字节序标记（Byte-Order Magic）放在 SHB 偏移 8 处，用来判断后续块的大小端。
@@ -73,6 +80,8 @@ class LiveStats:
     tasks: int
     last_task_id: str | None
     last_error: str
+    #: 本会话各窗口生成的检测任务（有上限），用于按会话聚合告警
+    task_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -89,6 +98,7 @@ class LiveStats:
             "tasks": self.tasks,
             "last_task_id": self.last_task_id,
             "last_error": self.last_error,
+            "task_ids": list(self.task_ids),
         }
 
 
@@ -133,6 +143,18 @@ class PcapFollower:
         """读取自上次以来新增的完整报文；文件还不存在时返回空列表（等待抓包工具落盘）。"""
         if not self.path.exists():
             return []
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            return []
+        if size < self._offset:
+            # 文件被截断或轮转（新文件更短）：从头重读，否则 seek 越界后永远读空
+            self._offset = 0
+            self._buffer = b""
+            self._mode = None
+            self._header_ready = False
+            self._ng_known = False
+            self._ng_interfaces = []
         with self.path.open("rb") as handle:
             handle.seek(self._offset)
             chunk = handle.read()
@@ -297,9 +319,12 @@ class _LiveSession:
     tasks: int = 0
     last_task_id: str | None = None
     last_error: str = ""
+    task_ids: list[str] = field(default_factory=list)
     _recent: list[Frame] = field(default_factory=list)
     _seen: set[str] = field(default_factory=set)
+    _seen_order: deque[str] = field(default_factory=deque)
     _pending: list[Segment] = field(default_factory=list)
+    dropped: int = 0
     _window_started: float = field(default_factory=time.time)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -319,6 +344,7 @@ class _LiveSession:
                 tasks=self.tasks,
                 last_task_id=self.last_task_id,
                 last_error=self.last_error,
+                task_ids=tuple(self.task_ids),
             )
 
 
@@ -341,10 +367,6 @@ class LiveManager:
         source: str = "",
     ) -> LiveStats:
         resolved = pcap_path.resolve()
-        with self._lock:
-            for session in self._sessions.values():
-                if session.pcap_path == resolved and session.thread is not None and session.thread.is_alive():
-                    raise LiveError(f"该文件已在跟随中：{session.live_id}")
         live_id = uuid.uuid4().hex[:12]
         session = _LiveSession(
             live_id=live_id,
@@ -360,7 +382,14 @@ class LiveManager:
         session.thread = threading.Thread(
             target=_run_follow, args=(session,), name=f"live-{live_id}", daemon=True
         )
+        # 查重与登记必须在同一把锁里完成，否则两个并发 start 都能通过查重
         with self._lock:
+            for existing in self._sessions.values():
+                if existing.pcap_path != resolved or existing.thread is None:
+                    continue
+                # 刚登记还没 start() 的会话也算「在跟随」，否则并发 start 都能通过查重
+                if existing.thread.is_alive() or not existing.stop_event.is_set():
+                    raise LiveError(f"该文件已在跟随中：{existing.live_id}")
             self._sessions[live_id] = session
         session.thread.start()
         return session.snapshot()
@@ -434,7 +463,7 @@ def _run_follow(session: _LiveSession) -> None:
             with session._lock:
                 session.last_error = f"{type(exc).__name__}: {exc}"
             session.stop_event.wait(1.0)  # 出错退避，避免刷屏
-            continue
+        # 出错时也照常检查窗口，否则恢复后旧正文一直堆着不落库
         if time.time() - session._window_started >= session.window_s:
             _flush_window(session)
     _flush_window(session)
@@ -466,11 +495,20 @@ def _ingest_packets(session: _LiveSession, packets: list[RawPacket]) -> None:
                 if key in session._seen:
                     continue
                 session._seen.add(key)
+                session._seen_order.append(key)
+                while len(session._seen_order) > MAX_SEEN_KEYS:
+                    session._seen.discard(session._seen_order.popleft())
             new_segments.append(Segment(path=message.label, text=message.body))
     if not new_segments:
         return
     with session._lock:
         session._pending.extend(new_segments)
+        overflow = len(session._pending) - MAX_PENDING_SEGMENTS
+        if overflow > 0:
+            # 识别/落库长期失败时不能无限堆正文：丢最旧的，并在状态里暴露
+            del session._pending[:overflow]
+            session.dropped += overflow
+            session.last_error = f"待落库队列超过 {MAX_PENDING_SEGMENTS} 条，丢弃 {overflow} 条旧正文"
 
 
 def _flush_window(session: _LiveSession) -> None:
@@ -503,9 +541,18 @@ def _flush_window(session: _LiveSession) -> None:
         )
     except Exception as exc:  # 旁路失败不影响跟随本身
         with session._lock:
+            # 没建成任务就把这批正文放回队头，下个窗口重试；同时限长防止无限堆积
+            session._pending[:0] = pending
+            overflow = len(session._pending) - MAX_PENDING_SEGMENTS
+            if overflow > 0:
+                del session._pending[-overflow:]
+                session.dropped += overflow
             session.last_error = f"create_task: {exc}"
         return
     with session._lock:
         session.tasks += 1
         session.segments += len(pending)
         session.last_task_id = task_id
+        session.task_ids.append(task_id)
+        if len(session.task_ids) > MAX_TRACKED_TASKS:
+            del session.task_ids[: len(session.task_ids) - MAX_TRACKED_TASKS]

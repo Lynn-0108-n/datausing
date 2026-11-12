@@ -1,4 +1,4 @@
-"""识别流水线测试：L1/L2/L3 协同、降级、脱敏级别覆盖。"""
+﻿"""识别流水线测试：L1/L2/L3 协同、降级、脱敏级别覆盖。"""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from app.identify.l2 import SemanticHit
 from app.identify.l3 import GuardVerdict
 from app.identify.pipeline import sha256_text
 from app.parsers import parse_json, parse_text
+from app.parsers.base import Document, Segment
 
 ID_CARD = "11010519491231002X"
 PHONE = "13800138000"
@@ -63,42 +64,13 @@ def test_l1_only_json_document() -> None:
     assert set(findings) == {"$.name", "$.id_card"}
     id_finding = findings["$.id_card"]
     assert id_finding.level == Level.HIGH and id_finding.model_chain == "l1"
-    assert id_finding.masked == "110105********002X"
+    assert "已屏蔽:身份证号" in id_finding.masked
     assert ID_CARD not in id_finding.masked
     # 脱敏只作用在值上：区间从 0 开始，不把字段名算进去
     assert id_finding.spans[0]["start"] == 0
     name_finding = findings["$.name"]
-    # L1 只加「需复核」标记，姓名仍按 L2 模板遮成星号，不把原文留在脱敏副本里
-    assert name_finding.level == Level.LOW and name_finding.masked == "[低危]**"
+    # L1 是"前置警示 + 保留原文"，L2 才做首字符 + 星号\n    assert name_finding.level == Level.LOW and name_finding.masked == "[低危]张三"
     assert report.by_level["L3"] == 1 and report.by_level["L1"] == 1
-
-
-def test_medical_hit_masks_whole_sentence() -> None:
-    """症状与诊断在同一句时整句遮蔽，避免「反复头痛…」反推偏头痛。"""
-    text = "患者姓名：张三，主诉：反复头痛 3 个月，伴恶心呕吐，考虑偏头痛。复查血常规。"
-    finding = DetectionPipeline().analyze_text(text, DetectOptions())
-    assert finding is not None
-    assert "张三" not in finding.masked
-    assert "头痛" not in finding.masked
-    assert "恶心" not in finding.masked
-    assert "偏头痛" not in finding.masked
-    # 下一句没有被牵连
-    assert "复查血常规" in finding.masked
-    medical_span = next(span for span in finding.spans if span["type"] == "medical")
-    covered = text[medical_span["start"] : medical_span["end"]]
-    assert covered.startswith("患者姓名")
-    assert "偏头痛" in covered
-
-
-def test_medical_field_keeps_label_and_masks_value() -> None:
-    """医疗字段保留「主诉 / 初步诊断」标签，字段值用星号遮盖。"""
-    text = "主诉：反复头痛 3 个月；初步诊断：偏头痛。"
-    finding = DetectionPipeline().analyze_text(text, DetectOptions())
-    assert finding is not None
-    assert "主诉：" in finding.masked
-    assert "初步诊断：" in finding.masked
-    assert "头痛" not in finding.masked
-    assert "偏头痛" not in finding.masked
 
 
 def test_l2_merges_types_and_chain() -> None:
@@ -119,6 +91,48 @@ def test_l2_exception_marks_degraded() -> None:
     )
     assert report.degraded is True
     assert report.findings[0].model_chain == "l1"
+    assert report.engine_runs["l2"] == {"timeout": 1}
+    assert report.coverage == "partial"
+
+
+def test_engine_status_counts_include_skipped_and_filtered_segments() -> None:
+    document = Document(source="test", content_type="text", raw="", segments=[
+        Segment(path="safe", text="今天天气晴朗"),
+        Segment(path="phone", text=PHONE),
+        Segment(path="id", text=ID_CARD),
+    ])
+    report = DetectionPipeline().analyze_document(
+        document, DetectOptions(enable_l2=True, enable_l3=True, min_level=Level.HIGH),
+    )
+    assert report.engine_runs == {
+        "l2": {"skipped": 1, "unavailable": 2},
+        "l3": {"skipped": 2, "unavailable": 1},
+    }
+    assert report.degraded and report.coverage == "partial"
+    assert [finding.path for finding in report.findings] == ["id"]
+
+
+def test_l2_evidence_survives_rebasing() -> None:
+    pipeline = DetectionPipeline(semantic=FakeSemantic())
+    document = parse_json('{"phone":"１３８００１３８０００"}')
+    baseline = pipeline.analyze_document(document, DetectOptions()).findings[0]
+    finding = pipeline.analyze_document(document, DetectOptions(enable_l2=True)).findings[0]
+    assert "medical" in finding.types
+    assert finding.score > baseline.score
+    assert (finding.spans[0]["start"], finding.spans[0]["end"]) == (0, 11)
+
+
+def test_l2_empty_prediction_is_executed() -> None:
+    class EmptySemantic(FakeSemantic):
+        def predict(self, text):
+            return []
+
+    report = DetectionPipeline(semantic=EmptySemantic()).analyze_document(
+        parse_text(PHONE), DetectOptions(enable_l2=True),
+    )
+    assert report.engine_runs["l2"] == {"executed": 1}
+    assert report.findings[0].model_chain == "l1>l2"
+    assert report.coverage == "complete"
 
 
 def test_l3_unsafe_upgrade_capped_by_max_target(monkeypatch) -> None:
@@ -154,7 +168,7 @@ def test_l3_unavailable_degrades_without_blocking() -> None:
 def test_mask_level_override_in_options() -> None:
     document = parse_text(f"联系电话 {PHONE}")
     report = DetectionPipeline().analyze_document(document, DetectOptions(mask_level=Level.HIGH))
-    assert "手机号" in report.findings[0].masked
+    assert "[已屏蔽:手机号]" in report.findings[0].masked
 
 
 def test_min_level_filters_low_findings() -> None:

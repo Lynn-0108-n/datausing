@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
 from typing import Callable
 
 from .types import EntityType, Hit
@@ -137,8 +139,12 @@ RULES: tuple[Rule, ...] = (
     _rule("mobile", EntityType.PHONE,
           r"(?<![0-9])(1[3-9][0-9]{9})(?![0-9])",
           0.65, 0.95),
+    # 前向断言：只在「连续邮箱字符段」的起点尝试匹配。
+    # 不加时，长数字/字母串（CSV 里几千位数字、base64 串）会让 `[A-Za-z0-9._%+-]+`
+    # 在每个起点都吞到结尾再回溯找 `@`，退化成 O(n²)；加上后段内其余起点 O(1) 失败，
+    # 最左匹配集合与不加断言时完全一致。
     _rule("email", EntityType.EMAIL,
-          r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})",
+          r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})",
           0.45, 0.90),
     _rule("ipv4", EntityType.IP,
           r"(?<![0-9])((?:[0-9]{1,3}\.){3}[0-9]{1,3})(?![0-9])",
@@ -162,34 +168,29 @@ RULES: tuple[Rule, ...] = (
     # ---- 非结构化字段类（键值对形态）----
     _rule("name_kv", EntityType.NAME,
           r"(?:姓名|名字|客户名|(?<![A-Za-z])(?:name|full_name)(?![A-Za-z]))"
-          r"\s*[\"']?\s*[:=：]\s*[\"']?([一-龥]{2,4}|[A-Za-z]{2,20})",
+          r"\s*[\"']?\s*[:=：]\s*[\"']?([\u4e00-\u9fa5]{2,4}|[A-Za-z]{2,20})",
           0.40, 0.75),
-    # 「姓名孙七」「户名赵六」：HR 简历、银行流水里常见无冒号紧凑写法。
-    # 用 valid_free_name 兜底，避免把「姓名是必填项」这类说明文字当成人名。
-    _rule("name_label", EntityType.NAME,
-          r"(?:姓名|户名|名字|客户名)\s*[：:]?\s*([一-龥]{2,4})",
-          0.40, 0.75, validate=valid_free_name),
     _rule("address_kv", EntityType.ADDRESS,
           r"(?:地址|住址|(?<![A-Za-z])address(?![A-Za-z]))"
-          r"\s*[\"']?\s*[:=：]\s*[\"']?([一-龥]{4,40})",
+          r"\s*[\"']?\s*[:=：]\s*[\"']?([\u4e00-\u9fa5]{4,40})",
           0.50, 0.75),
     # ---- 自由文本类（没有「姓名：」「地址：」这种字段名）----
     # 叙述型文本里人名常以「同事张珂铭…」「客户张三…」出现，靠角色词 + 姓氏降误报。
     _rule("name_free_role", EntityType.NAME,
           r"(?:同事|客户|用户|患者|病人|联系人|收件人|申请人|投诉人|负责人|经办人|就诊人|参保人|房东|租客|车主|驾驶员)"
-          r"\s*[：: ]?\s*([一-龥]{2,3})"
-          r"(?=[\s,，。；、！？：.;:!?]|反馈|表示|称|说|来电|联系|反映|投诉|申请|签字|确认|昨天|今天|上午|下午|上周|本周|已经|"
+          r"\s*[：: ]?\s*([\u4e00-\u9fa5]{2,3})"
+          r"(?=[\s，。；、！？：]|反馈|表示|称|说|来电|联系|反映|投诉|申请|签字|确认|昨天|今天|上午|下午|上周|本周|已经|"
           r"办理|预约|预订|购买|咨询|到访|来访|入职|离职|签约|下单|报修)",
           0.45, 0.80, validate=valid_free_name),
     # 句首人名：「萧亚轩反馈仓库这周需要补货…」——首字姓氏 + 后面紧跟动作/时间词。
     _rule("name_free_sentence", EntityType.NAME,
-          r"(?:^|[。；;！!？?\n])\s*([一-龥]{2,3})"
+          r"(?:^|[。；;！!？?\n])\s*([\u4e00-\u9fa5]{2,3})"
           r"(?=(?:反馈|表示|称|说|来电|联系|反映|投诉|申请|签字|确认|昨天|今天|上午|下午|上周|本周|"
-          r"已经|已|刚|要|将|正在|在|把|向|从|对|提交|离���|请假))",
+          r"已经|已|刚|要|将|正在|在|把|向|从|对|提交|离职|请假))",
           0.40, 0.70, validate=valid_free_name),
     # 动作句式：「由魏民整理」「请金秀贤补充」——中文叙述里点名前常用「由/请/向/给」。
     _rule("name_free_action", EntityType.NAME,
-          r"(?:由|请|向|给)([一-龥]{2,3})"
+          r"(?:由|请|向|给)([\u4e00-\u9fa5]{2,3})"
           r"(?=(?:整理|提交|负责|处理|补充|确认|签字|审核|审批|汇报|反馈|对接|跟进|执行|起草))",
           0.40, 0.72, validate=valid_free_name),
     # 自由文本地址：要有「省/市 + 区/县 + 路/街」的行政层级组合才认，
@@ -197,20 +198,18 @@ RULES: tuple[Rule, ...] = (
     _rule("address_free", EntityType.ADDRESS,
           # 句中的「住在/位于/地址：」不是地址的一部分，用非捕获前缀吃掉，捕获组只留行政区组合；
           # 末尾允许「中关村大街 1 号」这种带空格的门牌号写法。
-          r"(?:^|(?<=[\s，。；：、！？\"'（(,;:!?])|(?<=住在)|(?<=位于)|(?<=地址：)|(?<=住址：)|(?<=地址)|(?<=住址)|(?<=在))"
+          r"(?:^|(?<=[\s，。；：、！？\"'（(])|(?<=住在)|(?<=位于)|(?<=地址：)|(?<=住址：)|(?<=在))"
           r"(?!(?:他|她|我|你|您|们|住|从|到|往|去|在|于|和|与|地址|住址|位于))"
-          r"((?:[一-龥]{2,6}(?:省|自治区))?[一-龥]{2,6}市"
-          r"[一-龥]{0,8}(?:区|县)[一-龥]{0,10}(?:路|街|大道|巷|胡同)"
-          r"[一-龥A-Za-z0-9]{0,10}(?:\s*[0-9]{1,5}\s*号)?)",
+          r"((?:[\u4e00-\u9fa5]{2,6}(?:省|自治区))?[\u4e00-\u9fa5]{2,6}市"
+          r"[\u4e00-\u9fa5]{0,8}(?:区|县)[\u4e00-\u9fa5]{0,10}(?:路|街|大道|巷|胡同)"
+          r"[\u4e00-\u9fa5A-Za-z0-9]{0,10}(?:\s*[0-9]{1,5}\s*号)?)",
           0.50, 0.80),
     _rule("medical_kv", EntityType.MEDICAL,
           # 允许值中间带空格：「2 型糖尿病」「2 型糖尿病伴肾病」这类写法在病历里很常见；
           # 英文键 diagnosis / icd-10 在导出的病历 JSON、SQL 里很常见，一并收进来。
-          # 病历常见小节名一并收进来：「主诉：反复头痛 3 个月」这类没有「诊断」二字但同样敏感。
-          r"(?:现病史|既往史|出院诊断|辅助检查|主诉|病史|诊断|病情|症状|查体|住院|手术|用药|病历(?:记录)?|"
-          r"(?<![A-Za-z])(?:diagnosis|icd-?10)(?![A-Za-z]))"
+          r"(?:诊断|病史|病情|症状|住院|手术|用药|病历(?:记录)?|(?<![A-Za-z])(?:diagnosis|icd-?10)(?![A-Za-z]))"
           r"\s*[\"']?\s*[:=：]\s*[\"']?"
-          r"([一-龥A-Za-z0-9](?:[一-龥A-Za-z0-9 ]{0,18}[一-龥A-Za-z0-9])?)",
+          r"([\u4e00-\u9fa5A-Za-z0-9](?:[\u4e00-\u9fa5A-Za-z0-9 ]{0,18}[\u4e00-\u9fa5A-Za-z0-9])?)",
           0.75, 0.80),
 )
 
@@ -225,13 +224,16 @@ def detect(text: str, rules: tuple[Rule, ...] | None = None) -> list[Hit]:
         return []
     hits: list[Hit] = []
     for rule in rules if rules is not None else active_rules():
+        # 捕获组号越界（例如自定义规则没写捕获组却沿用默认 group=1）时退化为整段匹配，
+        # 不能让一条规则把整条检测链路抛成 500。
+        group = rule.group if rule.group <= rule.pattern.groups else 0
         for match in rule.pattern.finditer(text):
-            value = match.group(rule.group)
+            value = match.group(group)
             if not value:
                 continue
             if rule.validate is not None and not rule.validate(value):
                 continue
-            start, end = match.span(rule.group)
+            start, end = match.span(group)
             hits.append(
                 Hit(
                     type=rule.type,
@@ -247,11 +249,24 @@ def detect(text: str, rules: tuple[Rule, ...] | None = None) -> list[Hit]:
 
 
 _active_rules: tuple[Rule, ...] | None = None
+_scoped_rules = ContextVar('flowmask_scoped_rules', default=None)
 
 
 def active_rules() -> tuple[Rule, ...]:
     """当前生效的规则集（内置 + 数据库里启用的自定义规则）。"""
-    return _active_rules if _active_rules is not None else RULES
+    scoped = _scoped_rules.get()
+    return scoped if scoped is not None else (_active_rules if _active_rules is not None else RULES)
+
+
+@contextmanager
+def freeze_active_rules():
+    """同一次文档检测使用相同的不可变规则集，不改变其它线程的活动规则。"""
+    rules = active_rules()
+    token = _scoped_rules.set(rules)
+    try:
+        yield rules
+    finally:
+        _scoped_rules.reset(token)
 
 
 def set_active_rules(rules: tuple[Rule, ...] | None) -> None:
@@ -271,46 +286,15 @@ def dedupe_overlaps(hits: list[Hit]) -> list[Hit]:
     kept: list[Hit] = []
     for hit in ordered:
         if kept and hit.start < kept[-1].end:
+            previous = kept[-1]
+            strongest = max((previous, hit), key=lambda item: item.weight * item.confidence)
+            value = previous.value
+            if hit.end > previous.end:
+                value += hit.value[previous.end - hit.start:]
+            coverage = tuple(sorted({previous.type.value, hit.type.value,
+                                     *previous.coverage_types, *hit.coverage_types}))
+            kept[-1] = replace(strongest, start=previous.start, end=max(previous.end, hit.end),
+                               value=value, coverage_types=coverage)
             continue
         kept.append(hit)
     return kept
-
-
-# 地址命中只到「省/市/区」时，把紧跟的街道与门牌并入区间，避免脱敏后残留街道名。
-_ADDRESS_TAIL_RE = re.compile(
-    r"\s*[\一-\龥]{1,10}(?:路|街|大道|巷|弄|胡同)"
-    r"(?:\s*[0-9]{1,5}\s*号)?"
-    r"(?:\s*[0-9]{1,5}\s*(?:栋|幢|单元|室|楼|层))?"
-)
-_ADDRESS_ADMIN_TAIL = ("省", "市", "区", "县")
-
-
-def extend_address_hits(text: str, hits: list[Hit]) -> list[Hit]:
-    """行政区级地址命中向后吸收街道与门牌，例如「上海市浦东新区」→「上海市浦东新区世纪大道 1 号」。"""
-    extended: list[Hit] = []
-    for hit in hits:
-        if (
-            hit.type != EntityType.ADDRESS
-            or hit.rule.startswith("kw-")
-            or not hit.value.endswith(_ADDRESS_ADMIN_TAIL)
-        ):
-            extended.append(hit)
-            continue
-        match = _ADDRESS_TAIL_RE.match(text, hit.end)
-        if not match:
-            extended.append(hit)
-            continue
-        end = match.end()
-        extended.append(
-            Hit(
-                type=hit.type,
-                start=hit.start,
-                end=end,
-                value=text[hit.start:end],
-                weight=hit.weight,
-                confidence=hit.confidence,
-                rule=hit.rule,
-                direct_hint=hit.direct_hint,
-            )
-        )
-    return extended

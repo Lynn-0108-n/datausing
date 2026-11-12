@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -54,13 +55,67 @@ def _parse_theme(value: str) -> str:
     return normalized if normalized in THEMES else "system"
 
 
-ASSISTANT_MODES = ("off", "ollama")
+LEVEL_VALUES = ("SAFE", "L1", "L2", "L3")
 
 
-def _parse_assistant_mode(value: str) -> str:
-    """助手只支持规则引擎与本机 Ollama；历史 external 配置一律降级为 off。"""
-    normalized = (value or "").strip().lower()
-    return normalized if normalized in ASSISTANT_MODES else "off"
+def _parse_level(value: str) -> str:
+    """告警阈值只接受四级；配错退回 L1（不因一个笔误把告警全关掉或起不来）。"""
+    normalized = (value or "").strip().upper()
+    return normalized if normalized in LEVEL_VALUES else "L1"
+
+
+AUDIT_SECRET_FILE = "audit_secret.key"
+EXPORT_SECRET_FILE = "export_secret.key"
+
+
+def _load_secret(data_dir: Path, filename: str, env_name: str) -> tuple[str, str]:
+    """确定一个本地密钥，返回 ``(密钥, 来源)``。
+
+    优先级：环境变量 → ``<data_dir>/<filename>`` → 首次启动自动生成并落盘 →
+    落盘失败时退回进程内存随机值。
+
+    不再内置固定演示密钥：固定密钥等于把签名私钥写在源码里，任何拿到源码的人都能
+    伪造一整条自洽的审计链。自动生成的密钥跟随数据目录，重启后仍能校验历史记录。
+    """
+    explicit = os.environ.get(env_name, "").strip()
+    if explicit:
+        return explicit, "env"
+
+    path = data_dir / filename
+    try:
+        stored = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        stored = ""
+    except OSError:
+        # 目录不可读/被占用：不阻塞启动，代价是重启后旧签名验不过，需人工处理
+        return secrets.token_hex(32), "memory"
+    if stored:
+        return stored, "file"
+
+    generated = secrets.token_hex(32)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(generated + "\n", encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass  # Windows 上 chmod 语义有限，失败不影响功能
+    except OSError:
+        return generated, "memory"
+    return generated, "generated"
+
+
+def _load_audit_secret(data_dir: Path) -> tuple[str, str]:
+    """审计哈希链签名密钥（``FLOWMASK_AUDIT_SECRET``）。"""
+    return _load_secret(data_dir, AUDIT_SECRET_FILE, "FLOWMASK_AUDIT_SECRET")
+
+
+def _load_export_secret(data_dir: Path) -> tuple[str, str]:
+    """脱敏导出用的密钥（哈希加盐 / 伪名 / 可逆加密，``FLOWMASK_EXPORT_SECRET``）。
+
+    与审计密钥分开：导出密钥泄露不应影响审计链签名，反之亦然。
+    """
+    return _load_secret(data_dir, EXPORT_SECRET_FILE, "FLOWMASK_EXPORT_SECRET")
 
 
 @dataclass(frozen=True)
@@ -71,8 +126,15 @@ class Settings:
     db_path: Path
     # 留空表示不鉴权（本机演示默认）；部署时设置 Bearer Token
     api_token: str
-    # 审计哈希链签名密钥（HMAC-SHA256）；生产环境应从密钥管理注入
+    # 审计哈希链签名密钥（HMAC-SHA256）；优先 FLOWMASK_AUDIT_SECRET，否则自动生成并落盘
     audit_secret: str
+    # 密钥来源：env（环境变量）/ file（已有密钥文件）/ generated（本次首次生成）/ memory（未持久化）
+    audit_secret_source: str
+    # 脱敏导出密钥（哈希加盐 / 伪名 / 可逆加密）；优先 FLOWMASK_EXPORT_SECRET，否则自动生成并落盘
+    export_secret: str
+    export_secret_source: str
+    # 动态脱敏：可查看原文的操作人白名单（逗号分隔）；空表示都只能看脱敏副本
+    reveal_operators: str
     enable_l2: bool
     enable_l3: bool
     l2_endpoint: str
@@ -91,14 +153,21 @@ class Settings:
     # 前端默认主题：light / dark / system（system 表示跟随操作系统外观）。
     # 用户在界面里手动选过之后，个人偏好存在库里并优先于这个默认值。
     default_theme: str
-    # AI 助手：off（规则引擎，默认）/ ollama（本机回环，数据不出机）
+    # 告警触发阈值：检测结果级别 ≥ 该值才生成告警（L3/L2/L1/SAFE）。
+    # 默认 L1：所有敏感命中都进告警队列；演示"只看高危"可设 FLOWMASK_ALERT_MIN_LEVEL=L3。
+    alert_min_level: str
+    # 第三方插件：逗号分隔的 ``module:register`` 入口；空表示只用内置插件。
+    plugin_modules: str
+    # 图片 OCR（可选依赖 requirements-ocr.txt）：默认关闭，未安装时接口返回明确提示
+    ocr_enabled: bool
+    # OCR 输入图的最大边长（像素），过大先缩放，避免 CPU 推理过慢
+    ocr_max_side: int
+    # 本地 AI 助手：rules（默认，纯本地规则）/ ollama（本机模型生成，失败自动降级 rules）
+    assistant_enabled: bool
     assistant_mode: str
     assistant_endpoint: str
     assistant_model: str
     assistant_timeout_s: float
-    # OCR：rapidocr / ollama-vl；默认关闭，按需打开
-    ocr_engine: str
-    ocr_enabled: bool
 
     @classmethod
     def load(cls) -> "Settings":
@@ -108,11 +177,17 @@ class Settings:
             "CORS_ORIGINS",
             "http://127.0.0.1:5173,http://localhost:5173,http://127.0.0.1:8080",
         )
+        audit_secret, audit_secret_source = _load_audit_secret(data_dir)
+        export_secret, export_secret_source = _load_export_secret(data_dir)
         return cls(
             data_dir=data_dir,
             db_path=db_path,
             api_token=_env_str("API_TOKEN", ""),
-            audit_secret=_env_str("AUDIT_SECRET", "flowmask-demo-secret"),
+            audit_secret=audit_secret,
+            audit_secret_source=audit_secret_source,
+            export_secret=export_secret,
+            export_secret_source=export_secret_source,
+            reveal_operators=_env_str("REVEAL_OPERATORS", ""),
             enable_l2=_env_bool("ENABLE_L2", False),
             enable_l3=_env_bool("ENABLE_L3", False),
             l2_endpoint=_env_str("L2_ENDPOINT", "http://127.0.0.1:8091/v1/classify"),
@@ -127,14 +202,15 @@ class Settings:
             ner_model_dir=_env_str("NER_MODEL_DIR", ""),
             ner_device=_env_str("NER_DEVICE", "cpu").strip().lower(),
             default_theme=_parse_theme(_env_str("DEFAULT_THEME", "system")),
-            assistant_mode=_parse_assistant_mode(_env_str("ASSISTANT_MODE", "off")),
-            assistant_endpoint=_env_str(
-                "ASSISTANT_ENDPOINT", "http://127.0.0.1:11434/v1/chat/completions"
-            ),
-            assistant_model=_env_str("ASSISTANT_MODEL", "qwen2.5:1.5b"),
-            assistant_timeout_s=_env_float("ASSISTANT_TIMEOUT_S", 3.0),
-            ocr_engine=_env_str("OCR_ENGINE", "rapidocr").strip().lower(),
+            alert_min_level=_parse_level(_env_str("ALERT_MIN_LEVEL", "L1")),
+            plugin_modules=_env_str("PLUGINS", ""),
             ocr_enabled=_env_bool("OCR_ENABLED", False),
+            ocr_max_side=_env_int("OCR_MAX_SIDE", 1600),
+            assistant_enabled=_env_bool("ASSISTANT_ENABLED", True),
+            assistant_mode=_env_str("ASSISTANT_MODE", "rules").strip().lower(),
+            assistant_endpoint=_env_str("ASSISTANT_ENDPOINT", "http://127.0.0.1:11434/api/generate"),
+            assistant_model=_env_str("ASSISTANT_MODEL", "qwen2.5:1.5b"),
+            assistant_timeout_s=_env_float("ASSISTANT_TIMEOUT_S", 5.0),
         )
 
 

@@ -49,12 +49,11 @@ def test_base64_masking_replaces_whole_encoded_span() -> None:
     assert masked.startswith("前文 ") and masked.endswith(" 后文")
 
 
-def test_base64_id_card_masking_uses_stars() -> None:
+def test_base64_id_card_masking_uses_placeholder() -> None:
     text = f"前文 {ID_CARD_B64} 后文"
     masked = mask(text, analyze(text))
     assert ID_CARD_B64 not in masked
-    assert "*" in masked
-    assert "身份证号" not in masked
+    assert "已屏蔽" in masked
 
 
 def test_url_safe_base64_is_decoded() -> None:

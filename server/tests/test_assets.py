@@ -1,0 +1,276 @@
+"""前端与运维脚本的静态回归测试。
+
+这些文件没有 JS/PowerShell 测试基建，但本轮修复的问题都有明确的「坏形状」，
+用断言把它们钉住，避免以后重构时又写回去：
+- 内置单页不能再使用不存在的 span.level 字段；
+- 文件检测的选项必须走查询参数（后端只读 query）；
+- 前端偏好保存必须是 PUT（后端没有 POST）；
+- 配了 API Token 时前端要能自动带 Authorization 头；
+- demo.sh 不能读 DetectOut 顶层不存在的 level/types；
+- 停止脚本必须先核对进程命令行，不能只信 pid 文件；
+- 启动脚本要先做端口试绑预检；
+- 上传脚本不能把变量拼进 Invoke-Expression；
+- 任务导出必须走 Blob 下载（能带 Authorization，也不被弹窗拦截），且三个页面统一；
+- 批量结果的高危/中危要按 /stats 全量统计，不能只数前 100 条 findings；
+- 列表/轮询/详情请求要有序号保护，晚到的旧响应必须丢弃；
+- PPT 生成脚本不能硬编码某台机器的桌面路径；
+- requirements 要写明 pypdf 是 PDF 解析的可选回退。
+"""
+
+from pathlib import Path
+
+SERVER_DIR = Path(__file__).resolve().parents[1]
+REPO_DIR = SERVER_DIR.parent
+WEBUI = SERVER_DIR / "app" / "webui" / "index.html"
+WEB_SRC = REPO_DIR / "web" / "src"
+
+
+def _read(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def test_webui_uses_finding_spans_without_undefined_level_field():
+    html = _read(WEBUI)
+    assert "span.level" not in html
+    assert "flatMap" in html
+
+
+def test_webui_detect_file_passes_options_as_query():
+    html = _read(WEBUI)
+    assert "/detect/file?" in html
+    assert 'form.append("min_level"' not in html
+
+
+def test_webui_task_export_encodes_task_id():
+    html = _read(WEBUI)
+    assert "encodeURIComponent(taskId)" in html
+
+
+def test_web_frontend_saves_preference_with_put():
+    api = _read(WEB_SRC / "api.js")
+    assert 'jsonBody({ theme }, "PUT")' in api
+
+
+def test_web_frontend_injects_bearer_token():
+    api = _read(WEB_SRC / "api.js")
+    assert "flowmask_token" in api
+    assert "Authorization" in api
+    # 内置单页同样要能带 token
+    assert "flowmask_token" in _read(WEBUI)
+
+
+def test_detect_view_keeps_source_snapshot_for_highlight():
+    view = _read(WEB_SRC / "views" / "DetectView.vue")
+    assert "detectSource" in view
+    assert "fileLabel" in view
+
+
+def test_demo_script_reads_findings_not_missing_top_level_fields():
+    script = _read(SERVER_DIR / "scripts" / "demo.sh")
+    assert 'd["level"]' not in script
+    assert 'd["types"]' not in script
+    assert 'd.get("findings")' in script
+
+
+def test_stop_scripts_verify_process_ownership_before_kill():
+    ps1 = _read(SERVER_DIR / "scripts" / "stop_local.ps1")
+    sh = _read(SERVER_DIR / "scripts" / "stop_local.sh")
+    assert "CommandLine" in ps1 and "uvicorn" in ps1
+    assert "ps -o command=" in sh and "uvicorn" in sh
+
+
+def test_start_script_prechecks_ports_before_spawn():
+    ps1 = _read(SERVER_DIR / "scripts" / "start_local.ps1")
+    assert "TcpListener" in ps1
+
+
+def test_upload_script_does_not_use_invoke_expression():
+    deploy = REPO_DIR / "deploy" / "upload-netmon.ps1"
+    assert "Invoke-Expression" not in _read(deploy)
+
+
+def test_web_exports_use_authenticated_blob_download():
+    api_js = _read(WEB_SRC / "api.js")
+    # 统一的带鉴权下载入口：fetch + Authorization → Blob → <a download>
+    assert "export async function downloadWithAuth" in api_js
+    assert "authHeaders" in api_js
+    assert "createObjectURL" in api_js
+    assert "revokeObjectURL" in api_js
+    assert "Content-Disposition" in api_js
+    # 三个页面都调用它，不再裸 window.open / 裸 href（有 token 时带不上 Authorization）
+    for name in ("TasksView.vue", "BatchView.vue", "TrafficView.vue"):
+        view = _read(WEB_SRC / "views" / name)
+        assert "downloadWithAuth" in view, name
+        assert "window.open" not in view, name
+    assert 'href="api.taskExportUrl' not in _read(WEB_SRC / "views" / "BatchView.vue")
+    # 隐私导出也走同一入口
+    assert "downloadWithAuth(" in _read(WEB_SRC / "views" / "TasksView.vue")
+
+
+def test_tools_ppt_script_has_no_hardcoded_desktop_path():
+    script = _read(REPO_DIR / "tools" / "make_ppt_goal.py")
+    assert "31387" not in script
+    assert "FLOWMASK_PPT_OUT" in script
+    assert "Path.home()" in script
+
+
+def test_requirements_document_pdf_fallback():
+    requirements = _read(SERVER_DIR / "requirements.txt")
+    parser = _read(SERVER_DIR / "app" / "parsers" / "pdf_parser.py")
+    assert "pypdf" in parser  # 代码确实会回退到 pypdf
+    assert "pypdf" in requirements
+    assert "可选回退" in requirements
+
+
+def test_tasks_view_discards_stale_responses():
+    view = _read(WEB_SRC / "views" / "TasksView.vue")
+    assert "loadTasksSeq" in view
+    assert "loadAuditSeq" in view
+    assert "openTaskSeq" in view
+    assert "seq !== loadTasksSeq" in view
+    assert "seq !== openTaskSeq" in view
+
+
+def test_batch_view_summary_uses_full_task_stats():
+    view = _read(WEB_SRC / "views" / "BatchView.vue")
+    assert "api.stats(" in view
+    assert "by_level" in view
+    # 不能再从"前 100 条 findings"里数高危/中危
+    assert 'item.level === "L3"' not in view
+    assert 'item.level === "L2"' not in view
+
+
+def test_batch_view_discards_stale_poll_and_submit_responses():
+    view = _read(WEB_SRC / "views" / "BatchView.vue")
+    assert "refreshSeq" in view
+    assert "submitSeq" in view
+    assert "openTaskSeq" in view
+    assert "seq !== refreshSeq" in view
+    assert "seq !== submitSeq" in view
+    assert "seq !== openTaskSeq" in view
+    # 汇总被丢弃的已完成任务要能在下一轮补统计，不能永远停在 0
+    assert "statsLoaded" in view
+
+
+def test_powershell_scripts_with_non_ascii_have_utf8_bom():
+    """含中文的 .ps1 必须带 UTF-8 BOM。
+
+    一键入口 start_local.cmd 用 Windows PowerShell 5.1 执行 .ps1；
+    PS5.1 对无 BOM 的 UTF-8 文件按 ANSI 解码，中文会打乱引号导致整份脚本
+    解析失败（换机演练实测）。此用例防止编辑脚本时再次弄丢 BOM。
+    """
+    scripts = sorted(SERVER_DIR.glob("scripts/*.ps1")) + sorted(
+        REPO_DIR.glob("deploy/**/*.ps1")
+    )
+    assert scripts, "未找到任何 PowerShell 脚本"
+    with_non_ascii = []
+    for path in scripts:
+        data = path.read_bytes()
+        if all(byte < 0x80 for byte in data):
+            continue
+        assert data.startswith(b"\xef\xbb\xbf"), (
+            f"{path.relative_to(REPO_DIR)} 含非 ASCII 字符但缺少 UTF-8 BOM，"
+            "Windows PowerShell 5.1 会解析失败（需保存为 UTF-8 with BOM）"
+        )
+        with_non_ascii.append(path.name)
+    assert with_non_ascii, "未找到含非 ASCII 字符的 PowerShell 脚本"
+
+
+def test_cmd_wrappers_are_ascii_only():
+    """一键 .cmd 包装必须是纯 ASCII。
+
+    cmd.exe 用 OEM 代码页（中文系统为 CP936）读取批处理文件；UTF-8 中文注释
+    会被解码成乱码甚至被当成命令执行（换机演练实测 start_local.cmd 打印
+    "'庯細Windows' 不是内部或外部命令"）。包装层只保留英文注释。
+    """
+    wrappers = sorted(SERVER_DIR.glob("scripts/*.cmd")) + sorted(
+        REPO_DIR.glob("deploy/**/*.cmd")
+    )
+    assert wrappers, "未找到任何 .cmd 包装脚本"
+    for path in wrappers:
+        data = path.read_bytes()
+        offending = [byte for byte in data if byte >= 0x80]
+        assert not offending, (
+            f"{path.relative_to(REPO_DIR)} 含非 ASCII 字节，cmd.exe 会按 OEM 代码页"
+            " 误解码；请把注释改成英文（保持纯 ASCII）"
+        )
+
+
+def test_cmd_wrappers_propagate_child_exit_code():
+    """包装脚本要把 powershell 子进程的退出码透出给调用方。
+
+    否则 start/demo 失败时 .cmd 仍返回 0，换机演练和自动化脚本会误判成功。
+    """
+    for name in ("start_local.cmd", "stop_local.cmd", "demo.cmd"):
+        text = _read(SERVER_DIR / "scripts" / name)
+        assert "set \"RC=%ERRORLEVEL%\"" in text, f"{name} 未保存子进程退出码"
+        assert "endlocal & exit /b %RC%" in text, f"{name} 未把退出码透出"
+
+
+def test_demo_script_reflects_server_side_dynamic_auth():
+    """演示脚本要按服务端授权语义展示动态脱敏，不能把"客户端自报"当已授权。"""
+    demo = _read(SERVER_DIR / "scripts" / "demo.ps1")
+    assert "FLOWMASK_REVEAL_OPERATORS" in demo
+    assert "客户端自报 authorized=true 未获服务端授权" in demo
+    assert "full_access" in demo
+
+
+def test_desktop_tray_is_optional_and_documented():
+    """托盘是可选能力：pystray 缺失/失败时必须静默降级，主服务照常启动。"""
+    source = _read(SERVER_DIR / "desktop.py")
+    assert "pystray" in source
+    assert "TRAY_TITLE" in source
+    assert "run_detached" in source
+    assert "托盘启动失败（不影响主服务）" in source
+    requirements = _read(SERVER_DIR / "requirements-desktop.txt")
+    assert "pystray" in requirements
+    assert "pillow" in requirements
+
+
+def test_installer_installs_for_current_user_with_icon():
+    """Inno Setup 安装包：当前用户安装（无管理员）、带图标、可卸载、出便携 zip。"""
+    iss = _read(SERVER_DIR / "installer" / "FlowMask.iss")
+    assert "PrivilegesRequired=lowest" in iss
+    assert "SetupIconFile=..\\assets\\flowmask.ico" in iss
+    assert "UninstallDisplayIcon=" in iss
+    assert "OutputBaseFilename=FlowMask-Setup-" in iss
+    assert "FlowMask.exe" in iss
+    build = _read(SERVER_DIR / "scripts" / "build_installer.ps1")
+    assert "ISCC.exe" in build
+    assert "dist_install" in build
+    assert "Compress-Archive" in build
+    assert "FlowMask-Portable-" in build
+    readme = SERVER_DIR / "installer" / "使用说明.txt"
+    assert readme.is_file()
+    assert "数据目录" in readme.read_text(encoding="utf-8")
+
+
+def test_icon_assets_are_bundled_and_used():
+    """图标资源：ICO 多尺寸容器、托盘 PNG、web favicon 与 index.html 引用保持一致。"""
+    ico = SERVER_DIR / "assets" / "flowmask.ico"
+    png = SERVER_DIR / "assets" / "flowmask-128.png"
+    assert ico.is_file() and ico.stat().st_size > 10_000
+    assert png.is_file() and png.stat().st_size > 1_000
+    assert ico.read_bytes()[:4] == b"\x00\x00\x01\x00"  # ICO 容器魔数，防止误存成 PNG
+    web_favicon = REPO_DIR / "web" / "public" / "favicon.ico"
+    assert web_favicon.is_file()
+    assert web_favicon.read_bytes() == ico.read_bytes(), "web/public/favicon.ico 应与 exe 图标一致"
+    index = _read(REPO_DIR / "web" / "index.html")
+    assert 'rel="icon"' in index
+    assert "/app/favicon.ico" in index
+
+
+def test_web_shortcut_mode_and_open_web_script():
+    """网页端快捷方式：create_shortcut.ps1 支持 -Mode web，open_web.ps1 负责探测与自动启动。"""
+    create = _read(SERVER_DIR / "scripts" / "create_shortcut.ps1")
+    assert '"web"' in create
+    assert "open_web.ps1" in create
+    assert "assets\\flowmask.ico" in create
+    assert "WindowStyle = 7" in create
+
+    open_web = _read(SERVER_DIR / "scripts" / "open_web.ps1")
+    assert "/api/v1/health" in open_web
+    assert "/app/" in open_web
+    assert "start_local.cmd" in open_web
+    assert "NoStart" in open_web
+    assert "DryRun" in open_web

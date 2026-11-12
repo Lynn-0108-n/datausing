@@ -1,357 +1,444 @@
-"""AI 助手测试（Day 2.8）。
+"""本地 AI 助手（第一次优化）：规则建议、风险研判、健康探测与 ollama 降级。
 
-覆盖：
-- 统计解读：空结果 → severity=info / source=rules
-- 统计解读：高危占比高 → severity=high + tips 含 L3 建议
-- 方案推荐：外包+审计 → strategy=block, audit_recommended=True
-- 方案推荐：教学+不可逆 → strategy=hash
-- 防回显：多余字段 → 400 固定文案（不是 422，不暴露 errors）
-- 助手关闭：assistant_mode=off 时不发网络请求
-- 回环限制：ollama 模式 endpoint 非回环 → degraded=True
-- 推荐规则：用途与要求标签的多种组合
+测试约定：
+- 全部虚构数据，不访问真实网络；ollama 相关路径一律 monkeypatch ``_generate`` /
+  ``_fetch_tags``，断网环境下也能稳定跑。
+- 敏感值只用于验证「不会被回显」，不写入任何断言产物。
 """
 
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
+from types import SimpleNamespace
 
-from app.api.schemas import AssistantAdviseIn, RecommendIn
-from app.assistant import advise, recommend
-from app.core.config import Settings
-from app.scenarios import SCENARIOS
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
-
-# ---------- 构造测试用 Settings ----------
-
-
-def _make_settings(**overrides) -> Settings:
-    """构造一份测试用 Settings，默认 assistant 关闭。"""
-    base = Settings.load()
-    # frozen dataclass → 用 replace
-    from dataclasses import replace
-
-    return replace(base, **overrides)
+from app.assistant import SOURCE_DEGRADED, SOURCE_LLM, SOURCE_RULES, Assistant
+from app.scenarios import STRATEGY_KEYS
 
 
-# ---------- 统计解读：规则引擎 ----------
+def make_settings(**overrides) -> SimpleNamespace:
+    """构造只含助手所需字段的 settings 替身（不依赖环境变量与数据库）。"""
+    base = {
+        "assistant_enabled": True,
+        "assistant_mode": "rules",
+        "assistant_endpoint": "http://127.0.0.1:11434/api/generate",
+        "assistant_model": "qwen2.5:1.5b",
+        "assistant_timeout_s": 5.0,
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
 
 
-def test_advise_empty_result_info():
-    """空结果：severity=info，source=rules，summary 提示无命中。"""
-    payload = AssistantAdviseIn(page="stats", total=0)
-    settings = _make_settings(assistant_mode="off")
-    out = advise(payload, settings)
-    assert out.severity == "info"
-    assert out.source == "rules"
-    assert out.degraded is False
-    assert "未发现敏感数据命中" in out.summary
-    assert out.model == ""
+@pytest.fixture()
+def app_client(tmp_env):
+    """模拟 main.py 的注册方式：assistant 路由挂进现有 /api/v1 外层路由。"""
+    from fastapi import APIRouter
+
+    from app.api.routes_assistant import router
+
+    app = FastAPI()
+    api = APIRouter(prefix="/api/v1")
+    api.include_router(router)
+    app.include_router(api)
+    with TestClient(app) as client:
+        yield client
 
 
-def test_advise_high_ratio_high_severity():
-    """高危占比 ≥10% → severity=high，tips 含 L3 建议。"""
-    payload = AssistantAdviseIn(
-        page="stats",
-        total=100,
-        by_level={"L3": 15, "L2": 20, "L1": 30, "SAFE": 35},
-        types=[
-            {"type": "id_card", "key": "", "count": 10},
-            {"type": "phone", "key": "", "count": 5},
-        ],
-    )
-    settings = _make_settings(assistant_mode="off")
-    out = advise(payload, settings)
-    assert out.severity == "high"
-    # tips 里至少有一条提到高危
-    titles = " ".join(t.title for t in out.tips)
-    assert "高危" in titles
-    assert any("block" in t.detail or "encrypt" in t.detail for t in out.tips)
+# ---------------------------------------------------------------------------
+# 规则模式：suggest
+# ---------------------------------------------------------------------------
 
 
-def test_advise_warn_severity():
-    """中危占比 ≥10% 但高危 <1% → severity=warn。"""
-    payload = AssistantAdviseIn(
-        page="stats",
-        total=100,
-        by_level={"L3": 0, "L2": 15, "L1": 20, "SAFE": 65},
-    )
-    settings = _make_settings(assistant_mode="off")
-    out = advise(payload, settings)
-    assert out.severity == "warn"
-
-
-def test_advise_with_types_top():
-    """类别 Top 建议：types 排序后第一条 count 最大。"""
-    payload = AssistantAdviseIn(
-        page="detect",
-        total=50,
-        by_level={"L2": 10, "SAFE": 40},
-        types=[
-            {"type": "phone", "key": "", "count": 3},
-            {"type": "id_card", "key": "", "count": 7},
-        ],
-    )
-    settings = _make_settings(assistant_mode="off")
-    out = advise(payload, settings)
-    # 至少有一条 tip 提到 id_card（count 最多）
-    all_text = " ".join(t.title + " " + t.detail for t in out.tips)
-    assert "id_card" in all_text
-
-
-# ---------- 方案推荐：规则引擎 ----------
-
-
-def test_recommend_outsourcing_audit_block():
-    """外包+审计 → strategy=block, audit_recommended=True。"""
-    payload = RecommendIn(purpose="outsourcing", requirements=["audit"])
-    settings = _make_settings(assistant_mode="off")
-    out = recommend(payload, settings)
-    assert out.strategy == "block"
-    assert out.audit_recommended is True
-    assert out.source == "rules"
-
-
-def test_recommend_teaching_irreversible_hash():
-    """教学+不可逆 → strategy=hash。"""
-    payload = RecommendIn(purpose="teaching", requirements=["irreversible"])
-    settings = _make_settings(assistant_mode="off")
-    out = recommend(payload, settings)
-    assert out.strategy == "hash"
-
-
-def test_recommend_public_sharing_irreversible():
-    """公开共享+不可逆 → strategy=block, min_level=L3。"""
-    payload = RecommendIn(purpose="public-sharing", requirements=["irreversible"])
-    settings = _make_settings(assistant_mode="off")
-    out = recommend(payload, settings)
-    assert out.strategy == "block"
-    assert out.min_level == "L3"
-
-
-def test_recommend_analysis_keep_statistics_generalize():
-    """数据分析+保留统计 → strategy=generalize。"""
-    payload = RecommendIn(purpose="analysis", requirements=["keep-statistics"])
-    settings = _make_settings(assistant_mode="off")
-    out = recommend(payload, settings)
-    assert out.strategy == "generalize"
-
-
-def test_recommend_dev_test_reversible_encrypt():
-    """开发测试+可逆 → strategy=encrypt。"""
-    payload = RecommendIn(purpose="dev-test", requirements=["reversible"])
-    settings = _make_settings(assistant_mode="off")
-    out = recommend(payload, settings)
-    assert out.strategy == "encrypt"
-
-
-def test_recommend_dev_test_keep_statistics_partial():
-    """开发测试+保留统计 → strategy=partial。"""
-    payload = RecommendIn(purpose="dev-test", requirements=["keep-statistics"])
-    settings = _make_settings(assistant_mode="off")
-    out = recommend(payload, settings)
-    assert out.strategy == "partial"
-
-
-def test_recommend_other_reversible_encrypt():
-    """其他用途+可逆 → strategy=encrypt。"""
-    payload = RecommendIn(purpose="other", requirements=["reversible"])
-    settings = _make_settings(assistant_mode="off")
-    out = recommend(payload, settings)
-    assert out.strategy == "encrypt"
-
-
-def test_recommend_default_fallback():
-    """未命中任何规则的组合 → 兜底 partial + L2。"""
-    payload = RecommendIn(purpose="other")
-    settings = _make_settings(assistant_mode="off")
-    out = recommend(payload, settings)
-    assert out.strategy == "partial"
-    assert out.min_level == "L2"
-
-
-# ---------- 路由层：防回显 + 400 ----------
-
-
-def test_assistant_advise_extra_field_400_not_422(client):
-    """多余字段（如 text）→ 400 固定文案，不是 422。"""
-    resp = client.post(
-        "/api/v1/assistant/advise",
-        json={"page": "stats", "total": 0, "text": "敏感原文"},
-    )
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "请求格式不正确"
-
-
-def test_assistant_recommend_extra_field_400(client):
-    """recommend 多余字段 → 400 固定文案。"""
-    resp = client.post(
-        "/api/v1/assistant/recommend",
-        json={"purpose": "dev-test", "masked": "something"},
-    )
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "请求格式不正确"
-
-
-def test_assistant_advise_invalid_enum_400(client):
-    """非法 page 枚举 → 400 固定文案（不是 422 + 详情）。"""
-    resp = client.post(
-        "/api/v1/assistant/advise",
-        json={"page": "unknown", "total": 0},
-    )
-    assert resp.status_code == 400
-    detail = resp.json()["detail"]
-    assert detail == "请求格式不正确"
-
-
-def test_assistant_recommend_invalid_purpose_400(client):
-    """非法 purpose 枚举 → 400 固定文案。"""
-    resp = client.post(
-        "/api/v1/assistant/recommend",
-        json={"purpose": "not-a-purpose"},
-    )
-    assert resp.status_code == 400
-
-
-def test_assistant_advise_ok_200(client):
-    """合法请求 → 200 + 响应模型字段齐全。"""
-    resp = client.post(
-        "/api/v1/assistant/advise",
-        json={
-            "page": "stats",
-            "total": 10,
-            "by_level": {"L3": 2, "L2": 3, "SAFE": 5},
-            "types": [{"type": "id_card", "key": "", "count": 2}],
-        },
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["severity"] in {"info", "warn", "high"}
-    assert body["source"] in {"rules", "local-model"}
-    assert body["generated_at"]
-
-
-def test_assistant_recommend_ok_200(client):
-    """合法 recommend 请求 → 200。"""
-    resp = client.post(
-        "/api/v1/assistant/recommend",
-        json={"purpose": "outsourcing", "requirements": ["audit"]},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["strategy"] == "block"
-    assert body["source"] == "rules"
-
-
-# ---------- 助手关闭 / 回环限制 ----------
-
-
-def test_advise_off_mode_no_network():
-    """assistant_mode=off 时不发任何网络请求。"""
-    payload = AssistantAdviseIn(page="stats", total=10, by_level={"L2": 5})
-    settings = _make_settings(assistant_mode="off")
-    with patch("urllib.request.urlopen") as mock_open:
-        out = advise(payload, settings)
-        mock_open.assert_not_called()
-    assert out.source == "rules"
-    assert out.degraded is False
-
-
-def test_advise_ollama_non_loopback_degraded():
-    """ollama 模式 endpoint 非回环 → 不发请求，degraded=True。"""
-    payload = AssistantAdviseIn(page="stats", total=10, by_level={"L2": 5})
-    settings = _make_settings(
-        assistant_mode="ollama",
-        assistant_endpoint="http://10.0.0.5:11434/v1/chat/completions",
-    )
-    with patch("urllib.request.urlopen") as mock_open:
-        out = advise(payload, settings)
-        mock_open.assert_not_called()
-    # 回环校验失败 → 不发请求 → 回退规则引擎 + degraded=True
-    assert out.source == "rules"
-    assert out.degraded is True
-
-
-def test_advise_ollama_loopback_calls_model():
-    """ollama 模式 endpoint 回环 → 发请求；模拟成功响应 → source=local-model。"""
-    payload = AssistantAdviseIn(page="stats", total=10, by_level={"L2": 5})
-    settings = _make_settings(
-        assistant_mode="ollama",
-        assistant_endpoint="http://127.0.0.1:11434/v1/chat/completions",
-        assistant_model="qwen2.5:1.5b",
-    )
-
-    # 构造一个 OpenAI 兼容响应
-    fake_response = type(
-        "FakeResp",
-        (),
+def test_suggest_medical_scenario_uses_hash_and_l2() -> None:
+    assistant = Assistant(make_settings())
+    result = assistant.suggest(
         {
-            "read": lambda self: json.dumps(
-                {
-                    "choices": [
-                        {"message": {"content": "模型给出的总体评估。"}}
-                    ]
-                }
-            ).encode("utf-8"),
-            "__enter__": lambda self: self,
-            "__exit__": lambda self, *a: None,
-        },
-    )()
-
-    with patch("urllib.request.urlopen", return_value=fake_response) as mock_open:
-        out = advise(payload, settings)
-        mock_open.assert_called_once()
-    assert out.source == "local-model"
-    assert out.model == "qwen2.5:1.5b"
-    assert out.degraded is False
-    assert out.summary == "模型给出的总体评估。"
-
-
-def test_advise_ollama_loopback_failure_degraded():
-    """ollama 模式回环但请求失败 → degraded=True，source=rules。"""
-    payload = AssistantAdviseIn(page="stats", total=10, by_level={"L2": 5})
-    settings = _make_settings(
-        assistant_mode="ollama",
-        assistant_endpoint="http://127.0.0.1:11434/v1/chat/completions",
+            "scenario": "medical",
+            "content_type": "csv",
+            "fields": ["patient_id", "visit_no"],
+            "level_counts": {"L2": 4},
+            "text_length": 320,
+            "prompt": "科研统计用",
+        }
     )
-    with patch("urllib.request.urlopen", side_effect=Exception("connection refused")):
-        out = advise(payload, settings)
-    assert out.source == "rules"
-    assert out.degraded is True
+    assert result["source"] == SOURCE_RULES
+    assert result["strategy"] == "hash"
+    assert result["mask_level"] == "L2"
+    assert result["min_level"] == "HIGH"
+    assert result["enable_l2"] is True
+    assert result["enable_l3"] is False
+    assert "场景" in result["rationale"]
 
 
-def test_advise_external_mode_no_network():
-    """历史 external 配置不再调用任何外部 API，直接走规则引擎。"""
-    payload = AssistantAdviseIn(page="stats", total=10, by_level={"L2": 5})
-    settings = _make_settings(
-        assistant_mode="external",
-        assistant_endpoint="https://api.example.com/v1/chat/completions",
-        assistant_model="gpt-4o-mini",
+def test_suggest_publish_scenario_blocks_public_content() -> None:
+    assistant = Assistant(make_settings())
+    result = assistant.suggest(
+        {
+            "scenario": "publish",
+            "content_type": "text",
+            "fields": [],
+            "level_counts": {},
+            "text_length": 100,
+            "prompt": "对外发布",
+        }
     )
-    with patch("urllib.request.urlopen") as mock_open:
-        out = advise(payload, settings)
-        mock_open.assert_not_called()
-    assert out.source == "rules"
-    assert out.degraded is False
+    assert result["strategy"] == "block"
+    assert result["mask_level"] == "L3"
+    assert result["enable_l3"] is True
 
 
-def test_assistant_mode_external_normalized_to_off(monkeypatch):
-    """环境变量里残留 external 时，配置层降级为 off。"""
-    monkeypatch.setenv("FLOWMASK_ASSISTANT_MODE", "external")
-    settings = Settings.load()
-    assert settings.assistant_mode == "off"
+def test_suggest_unknown_scenario_falls_back_to_rules() -> None:
+    """没有场景时按字段打分：身份类字段 → 哈希 + L3，最低级别回落 SAFE。"""
+    assistant = Assistant(make_settings())
+    result = assistant.suggest(
+        {
+            "scenario": None,
+            "content_type": "json",
+            "fields": ["id_card", "patient_name"],
+            "level_counts": {"DANGER": 2},
+            "text_length": 50,
+            "prompt": "",
+        }
+    )
+    assert result["source"] == SOURCE_RULES
+    assert result["strategy"] in ("hash", "block")
+    assert result["mask_level"] == "L3"
+    assert result["min_level"] == "SAFE"
+    assert result["enable_l3"] is True
+    # 字段名含 name → 开启 NER 辅助识别自由文本人名
+    assert result["enable_ner"] is True
 
 
-# ---------- 推荐规则覆盖完整性 ----------
+def test_suggest_contact_fields_use_partial_and_l2() -> None:
+    assistant = Assistant(make_settings())
+    result = assistant.suggest(
+        {
+            "content_type": "csv",
+            "fields": ["phone", "email", "address"],
+            "level_counts": {},
+            "text_length": 10,
+            "prompt": "",
+        }
+    )
+    assert result["strategy"] == "partial"
+    assert result["mask_level"] == "L2"
+    assert result["enable_l2"] is True
 
 
-def test_recommend_all_purposes_have_rule():
-    """每个 purpose 至少有一条规则覆盖（避免落空）。"""
-    purposes = {"dev-test", "teaching", "outsourcing", "analysis", "public-sharing", "other"}
-    for purpose in purposes:
-        payload = RecommendIn(purpose=purpose)
-        settings = _make_settings(assistant_mode="off")
-        out = recommend(payload, settings)
-        # 兜底也会返回 partial + L2，所以一定有结果
-        assert out.strategy in {"block", "partial", "hash", "generalize", "pseudonym", "encrypt"}
-        assert out.reason
+def test_suggest_escalates_scenario_mask_level_on_danger_counts() -> None:
+    """审计场景默认 L1，但检测到 DANGER 且字段含联系方式时至少提升到 L2。"""
+    assistant = Assistant(make_settings())
+    result = assistant.suggest(
+        {
+            "scenario": "audit",
+            "content_type": "json",
+            "fields": ["phone"],
+            "level_counts": {"DANGER": 3},
+            "text_length": 20,
+            "prompt": "",
+        }
+    )
+    assert result["strategy"] == "hash"
+    assert result["mask_level"] == "L2"
+    assert result["enable_l2"] is True
+
+
+def test_suggest_public_intent_never_returns_partial() -> None:
+    """对外/演示用途下，即使场景基线与字段倾向 partial，也要升级为 block。"""
+    assistant = Assistant(make_settings())
+    result = assistant.suggest(
+        {
+            "scenario": "demo",
+            "content_type": "text",
+            "fields": ["name"],
+            "level_counts": {},
+            "text_length": 10,
+            "prompt": "对外演示，请不要泄露隐私",
+        }
+    )
+    assert result["strategy"] == "block"
+    assert result["mask_level"] == "L3"
+
+
+def test_suggest_output_has_all_fields_and_never_echoes_values() -> None:
+    assistant = Assistant(make_settings())
+    sensitive_marker = "13800138000"
+    result = assistant.suggest(
+        {
+            "content_type": "text",
+            "fields": ["姓名", "phone"],
+            "level_counts": {"L2": 1},
+            "text_length": 12,
+            "prompt": f"对外发布 {sensitive_marker}",
+        }
+    )
+    assert set(result) == {
+        "strategy",
+        "mask_level",
+        "min_level",
+        "enable_l2",
+        "enable_l3",
+        "enable_ner",
+        "retention",
+        "rationale",
+        "source",
+    }
+    assert result["strategy"] in STRATEGY_KEYS
+    assert result["mask_level"] in {"L1", "L2", "L3"}
+    assert result["min_level"] in {"SAFE", "MEDIUM", "HIGH"}
+    assert isinstance(result["rationale"], str) and result["rationale"]
+    # 输入里出现的手机号值不得出现在任何输出字段（含 rationale/retention）
+    assert sensitive_marker not in json.dumps(result, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# 规则模式：advise / health / models
+# ---------------------------------------------------------------------------
+
+
+def test_advise_returns_summary_findings_recommendations() -> None:
+    assistant = Assistant(make_settings())
+    result = assistant.advise(
+        {
+            "by_level": {"SAFE": 5, "L2": 2, "L3": 3},
+            "by_type": [{"type": "token", "count": 3}, {"type": "phone", "count": 2}],
+            "total_findings": 10,
+            "tasks": 2,
+            "scenario": "finance",
+        }
+    )
+    assert result["source"] == SOURCE_RULES
+    assert isinstance(result["summary"], str) and "10" in result["summary"]
+    assert 1 <= len(result["findings"]) <= 3
+    assert 1 <= len(result["recommendations"]) <= 3
+    joined = "".join(result["findings"] + result["recommendations"])
+    assert "访问令牌" in joined  # token 热点应被翻译成中文可执行建议
+    assert "L2" in joined or "L3" in joined
+
+
+def test_advise_handles_empty_payload() -> None:
+    assistant = Assistant(make_settings())
+    result = assistant.advise({})
+    assert result["summary"]
+    assert 1 <= len(result["findings"]) <= 3
+    assert 1 <= len(result["recommendations"]) <= 3
+
+
+def test_health_rules_mode_is_always_available() -> None:
+    assistant = Assistant(make_settings())
+    health = assistant.health()
+    assert health["enabled"] is True
+    assert health["mode"] == "rules"
+    assert health["model"] == "qwen2.5:1.5b"
+    assert health["available"] is True
+    assert "规则" in health["note"]
+
+
+def test_health_disabled_assistant() -> None:
+    assistant = Assistant(make_settings(assistant_enabled=False))
+    health = assistant.health()
+    assert health["enabled"] is False
+    assert health["available"] is False
+
+
+def test_models_rules_mode_lists_nothing() -> None:
+    assistant = Assistant(make_settings())
+    models = assistant.models()
+    assert models["models"] == []
+    assert models["endpoint"] == "http://127.0.0.1:11434/api/generate"
+    assert models["note"]
+
+
+def test_tags_url_is_derived_from_endpoint() -> None:
+    assistant = Assistant(make_settings())
+    assert assistant.tags_url() == "http://127.0.0.1:11434/api/tags"
+    assert Assistant(make_settings(assistant_endpoint="")).tags_url() == ""
+
+
+# ---------------------------------------------------------------------------
+# ollama 模式：成功走模型、失败一律降级且策略仍合法
+# ---------------------------------------------------------------------------
+
+
+def test_ollama_success_source_is_local_llm(monkeypatch) -> None:
+    assistant = Assistant(make_settings(assistant_mode="ollama"))
+
+    def fake_generate(self, prompt: str) -> str:
+        assert "id_card" in prompt  # prompt 只带字段名/计数/用途
+        return json.dumps(
+            {
+                "strategy": "generalize",
+                "mask_level": "L3",
+                "min_level": "SAFE",
+                "enable_l2": True,
+                "enable_l3": True,
+                "enable_ner": False,
+                "retention": "原文不落库",
+                "rationale": "模型建议泛化处理。",
+            }
+        )
+
+    monkeypatch.setattr(Assistant, "_generate", fake_generate)
+    result = assistant.suggest(
+        {
+            "scenario": "finance",
+            "content_type": "csv",
+            "fields": ["id_card", "bank_card"],
+            "level_counts": {"L3": 2},
+            "text_length": 64,
+            "prompt": "风控建模",
+        }
+    )
+    assert result["source"] == SOURCE_LLM
+    assert result["strategy"] == "generalize"
+    assert result["mask_level"] == "L3"
+
+
+def test_ollama_invalid_json_degrades_to_rules(monkeypatch) -> None:
+    assistant = Assistant(make_settings(assistant_mode="ollama"))
+    monkeypatch.setattr(Assistant, "_generate", lambda self, prompt: "抱歉，我无法输出 JSON")
+    result = assistant.suggest({"scenario": "medical", "content_type": "text", "fields": [], "level_counts": {}})
+    assert result["source"] == SOURCE_DEGRADED
+    assert result["strategy"] in STRATEGY_KEYS
+    assert result["mask_level"] in {"L1", "L2", "L3"}
+
+
+def test_ollama_exception_degrades_to_rules(monkeypatch) -> None:
+    assistant = Assistant(make_settings(assistant_mode="ollama"))
+
+    def boom(self, prompt: str) -> str:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(Assistant, "_generate", boom)
+    result = assistant.suggest({"content_type": "text", "fields": ["phone"], "level_counts": {}})
+    assert result["source"] == SOURCE_DEGRADED
+    assert result["strategy"] == "partial"
+    assert result["mask_level"] == "L2"
+
+
+def test_ollama_advise_success_and_failure(monkeypatch) -> None:
+    assistant = Assistant(make_settings(assistant_mode="ollama"))
+    payload = {"by_level": {"L3": 2, "SAFE": 3}, "by_type": [{"type": "token", "count": 2}], "total_findings": 5}
+
+    monkeypatch.setattr(
+        Assistant,
+        "_generate",
+        lambda self, prompt: json.dumps(
+            {"summary": "风险总体可控。", "findings": ["存在高危令牌。"], "recommendations": ["开启 L2 复核。"]}
+        ),
+    )
+    result = assistant.advise(payload)
+    assert result["source"] == SOURCE_LLM
+    assert result["summary"] == "风险总体可控。"
+
+    monkeypatch.setattr(Assistant, "_generate", lambda self, prompt: "{}")
+    degraded = assistant.advise(payload)
+    assert degraded["source"] == SOURCE_DEGRADED
+    assert degraded["summary"]
+
+
+def test_ollama_health_and_models_use_tags_probe(monkeypatch) -> None:
+    assistant = Assistant(make_settings(assistant_mode="ollama"))
+    monkeypatch.setattr(Assistant, "_fetch_tags", lambda self, timeout_s: ["qwen2.5:1.5b"])
+    health = assistant.health()
+    assert health["available"] is True
+    models = assistant.models()
+    assert models["models"] == ["qwen2.5:1.5b"]
+    assert models["note"] == ""
+
+    monkeypatch.setattr(Assistant, "_fetch_tags", lambda self, timeout_s: None)
+    unreachable = assistant.health()
+    assert unreachable["available"] is False
+    assert "不可达" in unreachable["note"]
+    assert assistant.models()["models"] == []
+    assert assistant.models()["note"] == "本机模型服务不可达（规则模式仍可用）"
+
+
+# ---------------------------------------------------------------------------
+# 路由层：/scenarios 与 /assistant/*（独立挂载，不依赖 main.py 注册）
+# ---------------------------------------------------------------------------
+
+
+def test_api_scenarios_returns_seven_templates(app_client) -> None:
+    response = app_client.get("/api/v1/scenarios")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 7
+    assert len(payload["scenarios"]) == 7
+    keys = {item["key"] for item in payload["scenarios"]}
+    assert {"medical", "publish", "education"} <= keys
+    for item in payload["scenarios"]:
+        assert set(item) == {
+            "key",
+            "label",
+            "description",
+            "content_types",
+            "strategy",
+            "mask_level",
+            "min_level",
+            "enable_l2",
+            "enable_l3",
+            "enable_ner",
+            "retention",
+        }
+        assert item["strategy"] in STRATEGY_KEYS
+        assert item["mask_level"] in {"L1", "L2", "L3"}
+        assert item["min_level"] in {"SAFE", "MEDIUM", "HIGH"}
+
+
+def test_api_suggest_medical(app_client) -> None:
+    response = app_client.post(
+        "/api/v1/assistant/suggest",
+        json={"scenario": "medical", "content_type": "csv", "fields": ["patient_id"], "level_counts": {"L2": 1}},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["strategy"] == "hash"
+    assert payload["mask_level"] == "L2"
+    assert payload["source"] == SOURCE_RULES
+
+
+def test_api_suggest_unknown_scenario_returns_400(app_client) -> None:
+    response = app_client.post("/api/v1/assistant/suggest", json={"scenario": "nope", "content_type": "text"})
+    assert response.status_code == 400
+    assert response.json()["detail"] == "未知场景"
+
+
+def test_api_health_models_advise(app_client) -> None:
+    health = app_client.get("/api/v1/assistant/health")
+    assert health.status_code == 200
+    assert health.json()["available"] is True
+    assert health.json()["mode"] == "rules"
+
+    models = app_client.get("/api/v1/assistant/models")
+    assert models.status_code == 200
+    assert models.json()["models"] == []
+
+    advise = app_client.post(
+        "/api/v1/assistant/advise",
+        json={"by_level": {"L3": 2, "SAFE": 3}, "by_type": [{"type": "phone", "count": 2}], "total_findings": 5},
+    )
+    assert advise.status_code == 200
+    body = advise.json()
+    assert body["summary"]
+    assert body["source"] == SOURCE_RULES
+
+
+def test_api_ollama_mode_uses_mocked_engine(app_client, monkeypatch) -> None:
+    """路由在 ollama 模式下也走降级逻辑：模型不可用 → 200 + rules/degraded。"""
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("FLOWMASK_ASSISTANT_MODE", "ollama")
+    get_settings.cache_clear()
+
+    def boom(self, prompt: str) -> str:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(Assistant, "_generate", boom)
+    response = app_client.post("/api/v1/assistant/suggest", json={"content_type": "text", "fields": ["phone"]})
+    assert response.status_code == 200
+    assert response.json()["source"] == SOURCE_DEGRADED
+    assert response.json()["strategy"] == "partial"

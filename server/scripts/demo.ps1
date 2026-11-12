@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    FlowMask 一键演示：跑完「检测 → 任务 → 流量 → 批量 → 动态脱敏 → 隐私导出 → 审计」。
+    FlowMask 一键演示：跑完「检测 → 任务 → 流量 → 批量 → 文件导出（Excel）→ 动态脱敏 → 隐私导出 → 审计」。
 
 .DESCRIPTION
     假设服务已经跑起来（scripts/start_local.ps1 或 FlowMask.exe）。
@@ -87,7 +87,7 @@ function Send-Multipart([string]$Path, [string]$FileField, [string[]]$Files, [st
 }
 
 # ---------------------------------------------------------------- 0. 健康检查
-Write-Step "0/8 健康检查"
+Write-Step "0/9 健康检查"
 $health = Invoke-Api -Path "/health"
 if ($null -eq $health) {
     Write-Host "服务没起来：先跑 scripts\start_local.cmd（或双击 FlowMask.exe）再重试。" -ForegroundColor Yellow
@@ -96,7 +96,7 @@ if ($null -eq $health) {
 Write-Ok "服务在 $BaseUrl（版本 $($health.version)，运行 $($health.uptime_s)s；L2=$($health.enable_l2) / L3=$($health.enable_l3) / NER=$($health.ner) / 敏感词 $($health.keywords) 条）"
 
 # ---------------------------------------------------------------- 1. 即时检测
-Write-Step "1/8 即时检测（文本里带身份证 / 手机号 / 地址 / 密钥）"
+Write-Step "1/9 即时检测（文本里带身份证 / 手机号 / 地址 / 密钥）"
 $sampleText = "客户张三，手机 13800138000，身份证 11010519491231002X，收货地址：福建省福州市鼓楼区五四路 100 号；接口凭据 api_key=sk-demo-1234567890abcdef。"
 
 $detect = Invoke-Api -Method POST -Path "/detect" -Body @{ text = $sampleText }
@@ -114,7 +114,7 @@ if ($detect -and $detect.findings.Count -gt 0) {
 }
 
 # ---------------------------------------------------------------- 2. 任务 + 审计
-Write-Step "2/8 建任务（落库 + 审计链）"
+Write-Step "2/9 建任务（落库 + 审计链）"
 $created = Invoke-Api -Method POST -Path "/tasks/text" -Body @{ text = $sampleText }
 if ($created) {
     $task = Wait-Task $created.task_id
@@ -130,7 +130,7 @@ if ($created) {
 }
 
 # ---------------------------------------------------------------- 3. pcap 流量
-Write-Step "3/8 pcap 流量导入（同一套识别/分级/脱敏/审计）"
+Write-Step "3/9 pcap 流量导入（同一套识别/分级/脱敏/审计）"
 if ($SkipTraffic) {
     Write-Host "  已按 -SkipTraffic 跳过" -ForegroundColor DarkGray
 } else {
@@ -149,7 +149,7 @@ if ($SkipTraffic) {
 }
 
 # ---------------------------------------------------------------- 4. 批量检测
-Write-Step "4/8 批量检测（多文件一次提交）"
+Write-Step "4/9 批量检测（多文件一次提交）"
 $files = @(
     (New-DemoFile "note.txt" "客户李四，手机 13900139000，收货地址：上海市浦东新区世纪大道 100 号。"),
     (New-DemoFile "order.json" '{"name":"王五","id_card":"11010519491231002X","amount":88}'),
@@ -170,15 +170,74 @@ if ($batch) {
     }
 }
 
-# ---------------------------------------------------------------- 5. 动态脱敏
-Write-Step "5/8 动态脱敏（未授权=脱敏副本；授权=原文并留审计）"
+# ---------------------------------------------------------------- 5. Excel 文件
+Write-Step "5/9 文件检测 + 脱敏导出（Excel xlsx）"
+$xlsx = Join-Path (Join-Path $RepoRoot "samples") "demo-sheet.xlsx"
+if (-not (Test-Path $xlsx)) {
+    Write-Host "  找不到 $xlsx，跳过（可用 samples\make_demo_xlsx.py 重新生成）" -ForegroundColor Yellow
+} else {
+    $fileDetect = Send-Multipart -Path "/detect/file" -FileField "file" -Files @($xlsx)
+    if ($fileDetect -and $fileDetect.segments) {
+        $count = $fileDetect.segments
+        $paths = (@($fileDetect.masked_document.segments) | Select-Object -First 2 | ForEach-Object { $_.path }) -join "、"
+        $levels = (@($fileDetect.findings) | ForEach-Object { $_.level } | Sort-Object -Unique) -join "/"
+        Write-Ok "上传 $(Split-Path -Leaf $xlsx) → content_type=$($fileDetect.content_type)，$count 个片段（如 $paths），分级 $levels"
+    }
+    $exported = Join-Path $env:TEMP ("flowmask-demo-export-" + [guid]::NewGuid().ToString("N").Substring(0, 8) + ".xlsx")
+    $exportArgs = @("-s", "-S", "-o", $exported, "-w", "%{http_code}",
+        "-F", "file=@$xlsx", "-F", "strategy=partial", "-F", "fmt=auto", "$Api/detect/file/export")
+    $status = (& curl.exe @exportArgs | Select-Object -Last 1)
+    if ($status -eq "200") {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($exported)
+        try {
+            $parts = @($zip.Entries | ForEach-Object { $_.FullName })
+            $sheetEntry = $zip.GetEntry("xl/worksheets/sheet1.xml")
+            $reader = [System.IO.StreamReader]::new($sheetEntry.Open())
+            $sheetXml = $reader.ReadToEnd()
+            $reader.Dispose()
+        } finally {
+            $zip.Dispose()
+        }
+        if ($sheetXml -match "13812345678") {
+            Write-Bad "导出 xlsx 的单元格里仍出现原文手机号！"
+        } elseif ($sheetXml -notmatch "姓名") {
+            Write-Bad "导出 xlsx 丢了表头（姓名）！"
+        } else {
+            $size = (Get-Item $exported).Length
+            Write-Ok "导出 $size 字节的 xlsx（$($parts.Count) 个部件），表头保留、原文手机号已替换为掩码"
+        }
+        Remove-Item -Force $exported -ErrorAction SilentlyContinue
+    } else {
+        Write-Bad "导出 xlsx 失败（HTTP $status）"
+    }
+}
+
+# ---------------------------------------------------------------- 6. 动态脱敏
+Write-Step "6/9 动态脱敏（未授权=脱敏副本；原文仅限服务端白名单）"
 $maskedView = Invoke-Api -Method POST -Path "/dynamic/render" -Body @{ text = $sampleText; authorized = $false }
 $rawView = Invoke-Api -Method POST -Path "/dynamic/render" -Body @{ text = $sampleText; authorized = $true; mask_level = "L3" }
-if ($maskedView) { Write-Ok "未授权视图：policy=$($maskedView.policy)，分级 $($maskedView.level)，脱敏副本长度 $($maskedView.text.Length)" }
-if ($rawView) { Write-Ok "授权视图：policy=$($rawView.policy)，操作人 $($rawView.operator_id)，返回原文长度 $($rawView.text.Length)（已写审计链）" }
+if ($maskedView) {
+    if ($maskedView.text -match "11010519491231002X|13800138000") {
+        Write-Bad "未授权视图里仍出现原始敏感值！"
+    } else {
+        Write-Ok "未授权视图：policy=$($maskedView.policy)，分级 $($maskedView.level)，脱敏副本长度 $($maskedView.text.Length)，不含原文"
+    }
+}
+if ($rawView) {
+    if ($rawView.policy -eq "full_access") {
+        if ($rawView.text -match "11010519491231002X") {
+            Write-Ok "服务端授权视图：policy=full_access，操作人 $($rawView.operator_id)，返回原文（已写审计链）"
+        } else {
+            Write-Bad "policy=full_access 但返回内容不含原文"
+        }
+    } else {
+        Write-Ok "客户端自报 authorized=true 未获服务端授权：policy=$($rawView.policy)，仍返回脱敏副本（需把操作人加入 FLOWMASK_REVEAL_OPERATORS 白名单）"
+    }
+}
 
-# ---------------------------------------------------------------- 6. 隐私导出
-Write-Step "6/8 隐私增强导出（Laplace + l-多样性）"
+# ---------------------------------------------------------------- 7. 隐私导出
+Write-Step "7/9 隐私增强导出（Laplace + l-多样性）"
 if ($task) {
     $privacy = Invoke-Api -Path "/tasks/$($task.id)/export/privacy?format=json&epsilon=1.0&l=3"
     if ($privacy) {
@@ -188,16 +247,16 @@ if ($task) {
     }
 }
 
-# ---------------------------------------------------------------- 7. 审计链
-Write-Step "7/8 审计链校验"
+# ---------------------------------------------------------------- 8. 审计链
+Write-Step "8/9 审计链校验"
 $verify = Invoke-Api -Path "/audit/verify"
 if ($verify) {
     if ($verify.ok) { Write-Ok "审计链完整：$($verify.total) 条，ok=$($verify.ok)" }
     else { Write-Bad "审计链断在 #$($verify.broken_at)" }
 }
 
-# ---------------------------------------------------------------- 8. 统计看板
-Write-Step "8/8 统计看板数据"
+# ---------------------------------------------------------------- 9. 统计看板
+Write-Step "9/9 统计看板数据"
 $stats = Invoke-Api -Path "/stats"
 if ($stats) {
     Write-Ok ("任务 $($stats.tasks) 个 / 命中 $($stats.total_findings) 条 / 分级 " + ($stats.by_level | ConvertTo-Json -Compress))

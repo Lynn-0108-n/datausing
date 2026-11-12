@@ -1,4 +1,4 @@
-"""CSV 文件解析：每个单元格一个 Segment，路径为 ``row{行号}.{列名}``。
+﻿"""CSV 文件解析：每个单元格一个 Segment，路径为 ``row{行号}.{列名}``。
 
 行号从 1 开始（数据行，表头不计），列名取表头；无表头时用 ``col{n}``。
 """
@@ -11,11 +11,8 @@ import io
 from .base import Document, ParseError, Segment
 
 
-def read_csv_rows(text: str) -> list[list[str]]:
-    """读取 CSV 所有行（含表头）；与 Excel 导出的 CSV 兼容：优先 utf-8-sig（去 BOM），再尝试 GBK。
-
-    公共接口，供 document_export 重建 CSV 时复用（保证读取口径一致）。
-    """
+def _read_csv_rows(text: str) -> list[list[str]]:
+    # 与 Excel 导出的 CSV 兼容：优先 utf-8-sig（去 BOM），再尝试 GBK
     for encoding in ("utf-8-sig", "gbk"):
         try:
             text.encode(encoding).decode(encoding)
@@ -26,10 +23,6 @@ def read_csv_rows(text: str) -> list[list[str]]:
         except csv.Error as exc:
             raise ParseError(f"CSV 解析失败：{exc}") from exc
     raise ParseError("CSV 编码无法识别（支持 UTF-8 / GBK）")
-
-
-# 兼容别名：内部 parse_csv 仍用旧名，保持调用不变
-_read_csv_rows = read_csv_rows
 
 
 def parse_csv(text: str, source: str = "data.csv") -> Document:
@@ -44,12 +37,14 @@ def parse_csv(text: str, source: str = "data.csv") -> Document:
     ]
 
     segments: list[Segment] = []
+    coordinate_paths = len(set(columns)) != len(columns)
     for row_index, row in enumerate(data_rows, start=1):
         for column_index, cell in enumerate(row):
             if not cell.strip():
                 continue
             column = columns[column_index] if column_index < len(columns) else f"col{column_index + 1}"
-            segments.append(Segment(path=f"row{row_index}.{column}", text=cell, hint=column))
+            path = f'row{row_index}[{column_index}]' if coordinate_paths else f'row{row_index}.{column}'
+            segments.append(Segment(path=path, text=cell, hint=column, location=(row_index, column_index)))
 
     if not segments:
         raise ParseError("CSV 中没有可检测的单元格")

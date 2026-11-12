@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+from ..security import safe_stored_mask
+
 import csv
 import io
 import json
@@ -53,7 +55,7 @@ def _rows(db: Database, task_id: str) -> list[dict[str, Any]]:
             "SELECT * FROM findings WHERE task_id=? ORDER BY id ASC",
             (task_id,),
         ).fetchall()
-    return [dict(row) for row in rows]
+    return [dict(row, masked=safe_stored_mask(row['masked'])) for row in rows]
 
 
 def _meta(db: Database, task_id: str, total: int) -> dict[str, Any]:
@@ -76,6 +78,17 @@ def _sql_literal(value: Any) -> str:
     if value is None:
         return "NULL"
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def sanitize_csv_cell(value: Any) -> Any:
+    """防 CSV 公式注入：Excel 会把 ``= + - @`` 开头的单元格当公式执行。
+
+    ``masked`` 来自被检测文档、``operator_id`` 来自请求头，都不可信；统一在
+    写 CSV 前加一个前导单引号，让 Excel 当纯文本显示（引号本身不显示）。
+    """
+    if isinstance(value, str) and value and value[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
 
 
 def export_findings(db: Database, task_id: str, fmt: str = "jsonl") -> tuple[bytes, str, str]:
@@ -101,7 +114,7 @@ def export_findings(db: Database, task_id: str, fmt: str = "jsonl") -> tuple[byt
         writer = csv.DictWriter(buffer, fieldnames=_CSV_COLUMNS, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
-            writer.writerow({key: row.get(key) for key in _CSV_COLUMNS})
+            writer.writerow({key: sanitize_csv_cell(row.get(key)) for key in _CSV_COLUMNS})
         # 加 UTF-8 BOM，避免 Excel 打开中文乱码
         return ("\ufeff" + buffer.getvalue()).encode("utf-8"), "text/csv; charset=utf-8", f"flowmask-{task_id}-{stamp}.csv"
 
@@ -138,15 +151,24 @@ def masked_document(document: Document, report: DocumentReport) -> dict[str, Any
     """即时生成"脱敏后文档"的表示（用于左右对照与下载）。
 
     - 文本类：把每段的脱敏结果按原顺序拼回去（同一请求内，内存里就有原文）；
+      没命中的段落原样保留，避免「安全文本右侧空白」；
     - 结构化类（json/csv/sql）：返回逐路径的脱敏片段，前端按路径渲染对照表。
+
+    命中集合用 ``all_findings``（min_level 过滤前），否则用户筛「只看高危」时
+    脱敏副本会丢掉低危段落。
     """
+    source = report.all_findings or report.findings
     if document.content_type == "text":
+        masked_by_path = {finding.path: finding.masked for finding in source}
         return {
             "content_type": "text",
-            "masked": "\n".join(f.masked for f in report.findings),
-            "segments": [{"path": f.path, "masked": f.masked} for f in report.findings],
+            "masked": "\n".join(masked_by_path.get(segment.path, segment.text) for segment in document.segments),
+            "segments": [
+                {"path": finding.path, "masked": finding.masked}
+                for finding in source
+            ],
         }
     return {
         "content_type": document.content_type,
-        "segments": [{"path": f.path, "level": f.level.value, "masked": f.masked} for f in report.findings],
+        "segments": [{"path": f.path, "level": f.level.value, "masked": f.masked} for f in source],
     }

@@ -124,6 +124,21 @@ def test_spec_and_entrypoint_are_consistent() -> None:
         assert excluded in spec, excluded
 
 
+def test_spec_bundles_l1_keyword_knowledge_assets() -> None:
+    """L1 三级词表是运行时读取的 YAML：漏打包不会报错，只会静默退化成空词表。"""
+    server_dir = Path(__file__).resolve().parents[1]
+    knowledge = server_dir / "app" / "identify" / "knowledge"
+    assert len(list(knowledge.glob("*.yaml"))) >= 3
+    spec = (server_dir / "flowmask.spec").read_text(encoding="utf-8")
+    assert '("app/identify/knowledge", "app/identify/knowledge")' in spec
+    # 调试版 spec 在 .gitignore 里（仅本机调试用）；存在时也要求同步，避免两份配置漂移
+    debug_spec = server_dir / "flowmask_debug.spec"
+    if debug_spec.exists():
+        assert '("app/identify/knowledge", "app/identify/knowledge")' in debug_spec.read_text(
+            encoding="utf-8"
+        )
+
+
 def test_build_script_exists_and_mentions_pyinstaller() -> None:
     script = Path(__file__).resolve().parents[1] / "scripts" / "build_exe.ps1"
     text = script.read_text(encoding="utf-8-sig")
@@ -218,7 +233,7 @@ def test_stop_shortcut_script_exists() -> None:
     stop_cmd = (scripts / "stop_flowmask.cmd").read_text(encoding="utf-8", errors="ignore")
     assert "--stop" in stop_cmd
     creator = (scripts / "create_shortcut.ps1").read_text(encoding="utf-8-sig")
-    assert "ValidateSet(\"start\", \"stop\")" in creator
+    assert "ValidateSet(\"start\", \"stop\", \"web\")" in creator
     assert "FlowMask 停止" in creator
 
 
@@ -233,3 +248,47 @@ def test_start_shortcut_uses_cmd_launcher() -> None:
     assert "start_flowmask.cmd" in creator
     # 启动/停止两个快捷方式都应通过 cmd.exe 调用脚本，而不是直接指向 exe
     assert creator.count("System32\\cmd.exe") >= 2
+
+
+# --------------------------------------------------------------------------- 托盘 / 图标 / 版本资源
+
+
+def test_tray_enabled_defaults_follow_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """托盘默认：打包 exe 开、源码运行关；显式 --tray/--no-tray 优先。"""
+    assert desktop._tray_enabled(True) is True
+    assert desktop._tray_enabled(False) is False
+    assert desktop._tray_enabled(None) is False  # pytest 里不是 frozen
+    monkeypatch.setattr(desktop.sys, "frozen", True, raising=False)
+    assert desktop._tray_enabled(None) is True
+
+
+def test_tray_image_prefers_packaged_png(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """托盘图标优先用打进 exe 的 assets/flowmask-128.png，避免托盘空白。"""
+    pytest.importorskip("PIL.Image")
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    source = Path(__file__).resolve().parents[1] / "assets" / "flowmask-128.png"
+    (assets / "flowmask-128.png").write_bytes(source.read_bytes())
+    monkeypatch.setattr(paths, "resource_root", lambda: tmp_path)
+    image = desktop._tray_image()
+    assert image is not None and image.size == (128, 128)
+
+
+def test_version_resource_matches_app_version() -> None:
+    """exe 文件属性里的版本必须跟 app.__version__ 一致，不能各写各的。"""
+    from app import __version__
+
+    text = (Path(__file__).resolve().parents[1] / "assets" / "flowmask_version.txt").read_text(encoding="utf-8")
+    numbers = [int(part) for part in __version__.split(".")]
+    padded = numbers + [0] * (4 - len(numbers))
+    dotted = ".".join(str(n) for n in padded)
+    assert f"filevers=({', '.join(str(n) for n in padded)})" in text
+    assert f"FileVersion', '{dotted}'" in text
+
+
+def test_spec_bundles_icon_and_version_resource() -> None:
+    """发布版 spec 必须带 exe 图标、版本资源，并把 assets/ 作为数据目录打进包。"""
+    spec = (Path(__file__).resolve().parents[1] / "flowmask.spec").read_text(encoding="utf-8")
+    assert 'icon="assets/flowmask.ico"' in spec
+    assert 'version="assets/flowmask_version.txt"' in spec
+    assert '("assets", "assets")' in spec

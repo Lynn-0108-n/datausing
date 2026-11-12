@@ -9,7 +9,7 @@ from __future__ import annotations
 import hmac
 from dataclasses import dataclass
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, UploadFile, status
 
 from ..core.config import Settings, get_settings
 from ..core.db import Database, get_database
@@ -47,11 +47,60 @@ class Operator:
     user_id: str
 
 
+def _clean_identity(value: str | None, header: str) -> str | None:
+    """校验请求头里的操作人/用户标识：不静默截断，拒绝控制字符与超长值。"""
+    if value is None:
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > 64:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{header} 最长 64 个字符")
+    if any(ch < " " or ch == "\x7f" for ch in cleaned):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{header} 不能包含控制字符")
+    return cleaned
+
+
 def operator_dep(
     x_operator_id: str | None = Header(default=None, alias="X-Operator-Id"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
 ) -> Operator:
-    return Operator(operator_id=(x_operator_id or "system")[:64], user_id=(x_user_id or "local")[:64])
+    return Operator(
+        operator_id=_clean_identity(x_operator_id, "X-Operator-Id") or "system",
+        user_id=_clean_identity(x_user_id, "X-User-Id") or "local",
+    )
+
+
+def reject_safe_mask_level(mask_level: str | None) -> None:
+    """落库类接口禁止 ``mask_level=SAFE``：库里只存脱敏副本，SAFE 会把原文写进 findings。"""
+    if (mask_level or "").strip().upper() == "SAFE":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="任务会落库脱敏副本，mask_level 不能为 SAFE；不脱敏仅支持 /detect 即时检测",
+        )
+
+
+_UPLOAD_CHUNK = 64 * 1024
+# 新版本 Starlette 把常量改名为 HTTP_413_CONTENT_TOO_LARGE，旧版本没有，取个兼容值
+_PAYLOAD_TOO_LARGE = getattr(status, "HTTP_413_CONTENT_TOO_LARGE", 413)
+
+
+async def read_upload_limited(upload: UploadFile, max_bytes: int) -> bytes:
+    """分块读上传文件，超过 ``max_bytes`` 立即 413，不把超大文件整个读进内存。"""
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await upload.read(_UPLOAD_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(
+                status_code=_PAYLOAD_TOO_LARGE,
+                detail=f"文件超过上限 {max_bytes // (1024 * 1024)} MB",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 _pipeline: DetectionPipeline | None = None
@@ -71,8 +120,9 @@ def reset_pipeline_for_tests() -> None:
 
 def build_options(
     *,
-    enable_l2: bool = False,
-    enable_l3: bool = False,
+    settings: Settings,
+    enable_l2: bool | None = None,
+    enable_l3: bool | None = None,
     enable_ner: bool = False,
     enable_keywords: bool | None = None,
     mask_level: str | None = None,
@@ -85,8 +135,8 @@ def build_options(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     return DetectOptions(
-        enable_l2=enable_l2,
-        enable_l3=enable_l3,
+        enable_l2=settings.enable_l2 if enable_l2 is None else enable_l2,
+        enable_l3=settings.enable_l3 if enable_l3 is None else enable_l3,
         enable_ner=enable_ner,
         enable_keywords=enable_keywords,
         mask_level=parsed_mask,

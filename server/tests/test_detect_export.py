@@ -1,246 +1,268 @@
-﻿"""导出接口测试：/detect/export 与 /detect/file/export。
+"""脱敏导出接口测试：策略清单 / 即时导出 / 密文还原 / 文件导出（HTTP 层）。
 
-用 FastAPI TestClient 跑真实接口，覆盖：
-- 文本导出（各策略）
-- 文件导出（各格式）
-- 不落库（task 总数不变）
-- 错误处理（非法策略、非法格式、超大文件）
+全部走 ``TestClient``（``client`` 夹具按临时配置现建应用），不联网、不落库；
+断言同时覆盖"下载响应头是否正确"与"导出内容零残留"。
 """
 
 from __future__ import annotations
 
-import csv
-import io
 import json
-from urllib.parse import unquote
+from dataclasses import replace
 
-import pytest
+from app.api.deps import settings_dep
+from app.core.config import get_settings
 
+PHONE = "13812345678"
 ID_CARD = "11010519491231002X"
-PHONE = "13800138000"
+EMAIL = "zhangsan@example.com"
+NAME = "张三"
+TEXT = f"姓名：{NAME}，手机：{PHONE}，身份证：{ID_CARD}，邮箱：{EMAIL}。"
+
+EXPORT_FLAGS = {"enable_l2": True, "enable_l3": True, "enable_ner": True}
 
 
-# ---------- /detect/export（文本入口）----------
+def _export_body(**overrides) -> dict:
+    body = {"text": TEXT, "content_type": "text", "strategy": "partial", "fmt": "auto"}
+    body.update(EXPORT_FLAGS)
+    body.update(overrides)
+    return body
 
 
-def test_detect_export_text_partial(client) -> None:
-    """文本导出 partial 策略：返回文件流，命中值已脱敏。"""
-    resp = client.post(
+# ---- 策略清单 ---------------------------------------------------------------
+
+
+def test_mask_strategies_endpoint(client) -> None:
+    response = client.get("/api/v1/mask-strategies")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["default"] == "partial"
+    keys = [item["key"] for item in body["strategies"]]
+    assert keys == ["block", "partial", "hash", "generalize", "pseudonym", "encrypt"]
+    for item in body["strategies"]:
+        assert item["label"] and item["description"]
+        assert item["reversible"] is (item["key"] == "encrypt")
+        categories = {example["category"] for example in item["examples"]}
+        assert categories == {"phone", "id_card", "email"}
+        assert all({"category", "raw", "masked"} == set(example) for example in item["examples"])
+
+
+# ---- 粘贴文本导出 -----------------------------------------------------------
+
+
+def test_export_text_returns_download(client) -> None:
+    response = client.post("/api/v1/detect/export", json=_export_body(strategy="block", fmt="txt"))
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    disposition = response.headers["content-disposition"]
+    assert disposition.startswith('attachment; filename="flowmask-export-')
+    assert disposition.endswith('.txt"')
+    content = response.content.decode("utf-8")
+    # L2 语义证据会给整段打上 requires_full_mask，block 策略按「整段 → 类别占位」处理，
+    # 不再按 span 逐值替换（见 app/tasks/document_export.py 的 _masked_texts）；
+    # 整段没有单一实体类别，类别占位回落到「其他」。
+    assert content.strip() == "[已屏蔽:其他]"
+    for value in (NAME, PHONE, ID_CARD, EMAIL):
+        assert value not in content
+
+
+def test_export_json_is_valid_and_clean(client) -> None:
+    document = json.dumps(
+        {"user": {"phone": PHONE, "email": EMAIL}, "id_card": ID_CARD},
+        ensure_ascii=False,
+    )
+    response = client.post(
         "/api/v1/detect/export",
-        json={"text": f"手机：{PHONE}", "strategy": "partial"},
+        json=_export_body(text=document, content_type="json", strategy="partial", fmt="json"),
     )
-    assert resp.status_code == 200
-    assert "attachment" in resp.headers.get("content-disposition", "")
-    content = resp.content.decode("utf-8")
-    assert PHONE not in content
-    assert content.startswith("手机：1")
-    assert "*" in content
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    text = response.content.decode("utf-8")
+    for value in (PHONE, ID_CARD, EMAIL):
+        assert value not in text
+    parsed = json.loads(text)
+    assert set(parsed) == {"user", "id_card"}
+    assert parsed["user"]["phone"] == "1******"
 
 
-def test_detect_export_text_block(client) -> None:
-    resp = client.post(
-        "/api/v1/detect/export",
-        json={"text": f"手机：{PHONE}", "strategy": "block"},
-    )
-    assert resp.status_code == 200
-    content = resp.content.decode("utf-8")
-    assert "手机号" in content
-    assert PHONE not in content
+def test_export_encrypt_then_decrypt_roundtrip(client) -> None:
+    encrypted = client.post("/api/v1/detect/export", json=_export_body(strategy="encrypt", fmt="txt"))
+    assert encrypted.status_code == 200
+    ciphertext = encrypted.content.decode("utf-8")
+    assert "enc:" in ciphertext
+    assert PHONE not in ciphertext and ID_CARD not in ciphertext
+
+    restored = client.post("/api/v1/detect/decrypt", json={"ciphertext": ciphertext})
+    assert restored.status_code == 200
+    body = restored.json()
+    # 整段 requires_full_mask 时只有一个密文 token，解密只替换一次
+    assert body["replaced"] >= 1
+    assert body["strategy"] == "encrypt"
+    assert PHONE in body["text"] and ID_CARD in body["text"]
 
 
-def test_detect_export_text_hash(client) -> None:
-    resp = client.post(
-        "/api/v1/detect/export",
-        json={"text": f"手机：{PHONE}", "strategy": "hash"},
-    )
-    assert resp.status_code == 200
-    content = resp.content.decode("utf-8")
-    assert PHONE not in content
-    # 哈希是 8 位十六进制
-    import re
-    hashes = re.findall(r"\b[0-9a-f]{8}\b", content)
-    assert len(hashes) >= 1
+def test_export_hash_is_deterministic(client) -> None:
+    first = client.post("/api/v1/detect/export", json=_export_body(strategy="hash", fmt="txt"))
+    second = client.post("/api/v1/detect/export", json=_export_body(strategy="hash", fmt="txt"))
+    assert first.status_code == second.status_code == 200
+    assert first.content == second.content
+    assert b"h_" in first.content
 
 
-def test_detect_export_text_encrypt_returns_key_header(client) -> None:
-    """encrypt 策略：响应头含 X-FlowMask-Encrypt-Key。"""
-    resp = client.post(
-        "/api/v1/detect/export",
-        json={"text": f"手机：{PHONE}", "strategy": "encrypt"},
-    )
-    assert resp.status_code == 200
-    key = resp.headers.get("x-flowmask-encrypt-key")
-    assert key is not None
-    assert key  # 非空
-    content = resp.content.decode("utf-8")
-    assert PHONE not in content
+def test_export_unknown_strategy_is_400(client) -> None:
+    response = client.post("/api/v1/detect/export", json=_export_body(strategy="rot13"))
+    assert response.status_code == 400
+    assert response.json()["detail"] == "不支持的脱敏策略"
 
 
-def test_detect_export_text_json_format(client) -> None:
-    """JSON 文本导出：自动探测为 json，返回 .json 文件。"""
-    raw = json.dumps({"phone": PHONE}, ensure_ascii=False)
-    resp = client.post(
-        "/api/v1/detect/export",
-        json={"text": raw, "strategy": "partial"},
-    )
-    assert resp.status_code == 200
-    content = resp.content.decode("utf-8")
-    parsed = json.loads(content)
-    assert PHONE not in parsed["phone"]
-    # Content-Type 是 application/json
-    assert "application/json" in resp.headers.get("content-type", "")
+def test_export_unknown_fmt_is_400(client) -> None:
+    response = client.post("/api/v1/detect/export", json=_export_body(fmt="xml"))
+    assert response.status_code == 400
+    assert response.json()["detail"] == "不支持的输出格式"
 
 
-def test_detect_export_text_invalid_strategy_400(client) -> None:
-    resp = client.post(
-        "/api/v1/detect/export",
-        json={"text": "test", "strategy": "unknown"},
-    )
-    assert resp.status_code == 400
+def test_export_text_to_structured_fmt_is_422(client) -> None:
+    """纯文本显式导成 csv/sql/json 会被拒绝：结构化格式必须与原文形态一致。
 
-
-def test_detect_export_text_invalid_format_400(client) -> None:
-    resp = client.post(
-        "/api/v1/detect/export",
-        json={"text": "test", "strategy": "partial", "format": "docx"},
-    )
-    # text 文档强制导成 docx 不支持（docx 只能从上传文件来）
-    assert resp.status_code == 400
-
-
-def test_detect_export_not_create_task(client, database) -> None:
-    """导出不落库：调用前后 task 总数不变。"""
-    # 先查当前 task 数
-    resp_before = client.get("/api/v1/tasks")
-    total_before = resp_before.json()["total"]
-    # 调导出
-    resp = client.post(
-        "/api/v1/detect/export",
-        json={"text": f"手机：{PHONE}", "strategy": "partial"},
-    )
-    assert resp.status_code == 200
-    # 再查 task 数
-    resp_after = client.get("/api/v1/tasks")
-    total_after = resp_after.json()["total"]
-    assert total_after == total_before
-
-
-# ---------- /detect/file/export（文件入口）----------
-
-
-def test_detect_export_file_txt(client) -> None:
-    content = f"手机：{PHONE}".encode("utf-8")
-    resp = client.post(
-        "/api/v1/detect/file/export",
-        files={"file": ("note.txt", content, "text/plain")},
-        data={"strategy": "block"},
-    )
-    assert resp.status_code == 200
-    body = resp.content.decode("utf-8")
-    assert "手机号" in body
-    assert PHONE not in body
-
-
-def test_detect_export_file_json(client) -> None:
-    raw = json.dumps({"phone": PHONE, "age": 25}, ensure_ascii=False)
-    resp = client.post(
-        "/api/v1/detect/file/export",
-        files={"file": ("data.json", raw.encode("utf-8"), "application/json")},
-        data={"strategy": "partial"},
-    )
-    assert resp.status_code == 200
-    parsed = json.loads(resp.content)
-    assert PHONE not in parsed["phone"]
-    assert parsed["age"] == 25
-
-
-def test_detect_export_file_csv(client) -> None:
-    raw = f"name,phone\n张三,{PHONE}\n"
-    resp = client.post(
-        "/api/v1/detect/file/export",
-        files={"file": ("data.csv", raw.encode("utf-8"), "text/csv")},
-        data={"strategy": "block"},
-    )
-    assert resp.status_code == 200
-    # CSV 用 utf-8-sig
-    content = resp.content.decode("utf-8-sig")
-    rows = list(csv.reader(io.StringIO(content)))
-    assert rows[0] == ["name", "phone"]
-    assert PHONE not in content
-
-
-def test_detect_export_file_sql(client) -> None:
-    raw = (
-        "CREATE TABLE users (id INT, phone VARCHAR(20));\n"
-        f"INSERT INTO users VALUES (1, '{PHONE}');\n"
-    )
-    resp = client.post(
-        "/api/v1/detect/file/export",
-        files={"file": ("data.sql", raw.encode("utf-8"), "application/sql")},
-        data={"strategy": "block"},
-    )
-    assert resp.status_code == 200
-    content = resp.content.decode("utf-8")
-    assert "CREATE TABLE" in content
-    assert PHONE not in content
-
-
-def test_detect_export_file_unsupported_415(client) -> None:
-    resp = client.post(
-        "/api/v1/detect/file/export",
-        files={"file": ("data.xyz", b"content", "application/octet-stream")},
-        data={"strategy": "partial"},
-    )
-    assert resp.status_code == 415
-
-
-def test_detect_export_file_invalid_strategy_400(client) -> None:
-    resp = client.post(
-        "/api/v1/detect/file/export",
-        files={"file": ("note.txt", b"hello", "text/plain")},
-        data={"strategy": "bad"},
-    )
-    assert resp.status_code == 400
-
-
-def test_detect_export_file_chinese_filename(client) -> None:
-    """中文文件名：Content-Disposition 同时含 ASCII 与 RFC 5987。"""
-    content = f"手机：{PHONE}".encode("utf-8")
-    resp = client.post(
-        "/api/v1/detect/file/export",
-        files={"file": ("中文数据.txt", content, "text/plain")},
-        data={"strategy": "partial"},
-    )
-    assert resp.status_code == 200
-    disposition = resp.headers.get("content-disposition", "")
-    assert 'filename="' in disposition
-    assert "filename*=UTF-8''" in disposition
-    import re
-    match = re.search(r"filename\*=UTF-8''([^;]+)", disposition)
-    assert match is not None
-    decoded = unquote(match.group(1))
-    assert "中文数据" in decoded
-
-
-def test_detect_export_min_level_safe_overrides(client) -> None:
-    """证明导出不受界面分级过滤影响：min_level 不在请求里，导出仍脱敏。
-
-    场景：/detect 在 min_level=L3 时无命中（手机号只是 L2），
-    但 /detect/export 仍脱敏（因为内部固定 min_level=SAFE）。
+    否则按目标格式重解析原文拿不到命中定位，会把未脱敏原文原样写回（历史实现曾如此）。
     """
-    # 先调 /detect 用 min_level=L3，应无命中
-    resp_detect = client.post(
-        "/api/v1/detect",
-        json={"text": f"手机：{PHONE}", "min_level": "L3"},
-    )
-    assert resp_detect.status_code == 200
-    assert len(resp_detect.json()["findings"]) == 0
-    # 再调 /detect/export，应脱敏
-    resp_export = client.post(
+    for fmt in ("csv", "sql", "json"):
+        response = client.post("/api/v1/detect/export", json=_export_body(fmt=fmt))
+        assert response.status_code == 422, fmt
+        assert PHONE not in response.text, fmt
+
+
+def test_export_invalid_content_type_is_400(client) -> None:
+    # content_type=docx 只能走上传入口；这里正文不是 docx 二进制
+    response = client.post("/api/v1/detect/export", json=_export_body(content_type="docx"))
+    assert response.status_code == 400
+    assert response.json()["detail"] == "请求内容无法处理（格式与 content_type 不一致或为空）"
+
+
+def test_export_bad_json_body_is_400_without_echo(client) -> None:
+    response = client.post(
         "/api/v1/detect/export",
-        json={"text": f"手机：{PHONE}", "strategy": "block"},
+        json=_export_body(text="{不是合法 JSON", content_type="json"),
     )
-    assert resp_export.status_code == 200
-    body = resp_export.content.decode("utf-8")
-    assert "手机号" in body
-    assert PHONE not in body
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail == "请求内容无法处理（格式与 content_type 不一致或为空）"
+    assert PHONE not in detail
+
+
+def test_export_missing_text_is_422(client) -> None:
+    response = client.post("/api/v1/detect/export", json={"content_type": "text"})
+    assert response.status_code == 422
+
+
+def test_encrypt_export_without_secret_is_400(client) -> None:
+    settings = get_settings()
+    client.app.dependency_overrides[settings_dep] = lambda: replace(settings, export_secret="")
+    try:
+        response = client.post("/api/v1/detect/export", json=_export_body(strategy="encrypt", fmt="txt"))
+        assert response.status_code == 400
+        assert response.json()["detail"] == "脱敏导出密钥未配置"
+    finally:
+        client.app.dependency_overrides.pop(settings_dep, None)
+
+
+# ---- 密文还原 ---------------------------------------------------------------
+
+
+def test_decrypt_without_ciphertext_is_400(client) -> None:
+    response = client.post("/api/v1/detect/decrypt", json={"ciphertext": "这里没有任何密文"})
+    assert response.status_code == 400
+    assert response.json()["detail"] == "没有可还原的密文片段"
+
+
+def test_decrypt_invalid_ciphertext_is_400(client) -> None:
+    response = client.post("/api/v1/detect/decrypt", json={"ciphertext": "enc:abc"})
+    assert response.status_code == 400
+    assert response.json()["detail"] == "密文片段无效"
+
+
+# ---- 上传文件导出 -----------------------------------------------------------
+
+
+def test_file_export_txt(client) -> None:
+    response = client.post(
+        "/api/v1/detect/file/export",
+        files={"file": ("customers.txt", TEXT.encode("utf-8"), "text/plain")},
+        data={"strategy": "partial", "fmt": "txt", "enable_l2": "true", "enable_l3": "true", "enable_ner": "true"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.headers["content-disposition"].startswith('attachment; filename="flowmask-export-')
+    content = response.content.decode("utf-8")
+    for value in (PHONE, ID_CARD, EMAIL):
+        assert value not in content
+
+
+def test_file_export_json_auto(client) -> None:
+    raw = json.dumps({"phone": PHONE}, ensure_ascii=False).encode("utf-8")
+    response = client.post(
+        "/api/v1/detect/file/export",
+        files={"file": ("data.json", raw, "application/json")},
+        data={"strategy": "partial", "fmt": "auto", "enable_l2": "true"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert PHONE not in response.content.decode("utf-8")
+
+
+def test_file_export_png_is_415(client) -> None:
+    response = client.post(
+        "/api/v1/detect/file/export",
+        files={"file": ("photo.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+        data={"strategy": "partial", "fmt": "auto"},
+    )
+    assert response.status_code == 415
+    assert response.json()["detail"] == "图片文件暂不支持导出（需先安装 OCR 可选依赖）"
+
+
+def test_file_export_unsupported_type_is_415(client) -> None:
+    response = client.post(
+        "/api/v1/detect/file/export",
+        files={"file": ("a.bin", b"\x00\x01")},
+        data={"strategy": "partial", "fmt": "auto"},
+    )
+    assert response.status_code == 415
+    assert response.json()["detail"] == "不支持的文件类型"
+
+
+def test_file_export_unknown_strategy_is_400(client) -> None:
+    response = client.post(
+        "/api/v1/detect/file/export",
+        files={"file": ("a.txt", TEXT.encode("utf-8"), "text/plain")},
+        data={"strategy": "rot13", "fmt": "txt"},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "不支持的脱敏策略"
+
+
+# ---- 既有接口行为不变 -------------------------------------------------------
+
+
+def test_existing_detect_endpoints_unchanged(client) -> None:
+    detected = client.post("/api/v1/detect", json={"text": f"身份证号：{ID_CARD}"})
+    assert detected.status_code == 200
+    body = detected.json()
+    assert set(body) >= {
+        "content_type",
+        "segments",
+        "findings",
+        "by_level",
+        "duration_ms",
+        "degraded",
+        "masked_document",
+    }
+    assert body['result_id'] and body['policy_version']
+    assert ID_CARD not in json.dumps(body, ensure_ascii=False)
+
+    uploaded = client.post(
+        "/api/v1/detect/file",
+        files={"file": ("a.txt", f"身份证号：{ID_CARD}".encode("utf-8"), "text/plain")},
+    )
+    assert uploaded.status_code == 200
+    assert uploaded.json()["content_type"] == "text"
+
+    assert client.get("/api/v1/formats").status_code == 200

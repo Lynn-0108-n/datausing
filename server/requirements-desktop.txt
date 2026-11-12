@@ -1,0 +1,12 @@
+# FlowMask 桌面增强依赖（可选）
+#
+# 只有下面两种场景才需要装：
+# 1. `python desktop.py --tray`（源码运行、要系统托盘图标）；
+# 2. 打包 exe（build_exe.ps1 / build_installer.ps1 会用到，把 pystray 收进 exe）。
+#
+# 安装（server/ 目录下）：
+#   pip install -r requirements-desktop.txt
+# 国内网络建议加镜像：
+#   pip install -r requirements-desktop.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+pystray==0.19.5
+pillow>=10.0

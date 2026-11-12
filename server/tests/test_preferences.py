@@ -81,7 +81,10 @@ def test_list_users_and_delete(client):
 def test_list_users_respects_limit(client):
     for index in range(5):
         client.put("/api/v1/preferences", json={"theme": "dark"}, headers=_headers(f"u{index}"))
-    assert len(client.get("/api/v1/preferences/users?limit=2").json()["users"]) <= 2
+    body = client.get("/api/v1/preferences/users?limit=2").json()
+    assert len(body["users"]) <= 2
+    # total 是符合条件的全部用户数，不是本页条数
+    assert body["total"] == 5
 
 
 @pytest.mark.parametrize("theme", ["light", "dark", "system"])

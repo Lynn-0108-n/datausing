@@ -1,132 +1,106 @@
-"""场景模式接口测试（Day 2.8）。
-
-覆盖：
-- 场景列表 200 + 6 个场景 + 字段齐全
-- 场景详情 200 + 含 sample/recommended_strategy
-- 不存在的 id → 404
-- 样例文本能命中至少一条 L1 规则（保证演示有效）
-"""
+"""场景模板（第一次优化）：数量、字段契约、参数取值与查询辅助函数。"""
 
 from __future__ import annotations
 
-from app.scenarios import SCENARIOS
+import dataclasses
+
+import pytest
+
+from app.scenarios import (
+    DEFAULT_SCENARIO_KEY,
+    LEVEL_KEYS,
+    SCENARIOS,
+    STRATEGY_KEYS,
+    get_scenario,
+    list_scenarios,
+    scenario_to_out,
+)
 
 
-def test_scenarios_list_200_and_count(client):
-    """GET /api/v1/scenarios 返回 6 个场景，字段齐全。"""
-    resp = client.get("/api/v1/scenarios")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert "items" in body
-    items = body["items"]
-    assert len(items) == len(SCENARIOS) == 6
-    # 字段齐全性
-    required = {
-        "id", "name", "description", "sample",
-        "recommended_strategy", "recommended_min_level",
-        "recommended_enable_l2", "recommended_enable_l3", "recommended_enable_ner",
-        "audit_recommended",
+def test_scenarios_at_least_seven() -> None:
+    """场景模板至少 7 个，且 list_scenarios 与字典声明顺序一致。"""
+    assert len(SCENARIOS) >= 7
+    scenarios = list_scenarios()
+    assert [item.key for item in scenarios] == list(SCENARIOS)
+    assert len({item.key for item in scenarios}) == len(scenarios)
+
+
+def test_scenario_fields_match_contract() -> None:
+    """每个模板转成 ScenarioOut 后字段齐全、取值合法（与 schemas.ScenarioOut 对齐）。"""
+    expected_keys = {
+        "key",
+        "label",
+        "description",
+        "content_types",
+        "strategy",
+        "mask_level",
+        "min_level",
+        "enable_l2",
+        "enable_l3",
+        "enable_ner",
+        "retention",
     }
-    for item in items:
-        assert required.issubset(item.keys()), f"缺少字段：{required - set(item.keys())}"
-        assert item["sample"], f"场景 {item['id']} 样例文本为空"
+    allowed_content_types = {"text", "json", "csv", "sql", "md", "log", "docx", "pdf", "image"}
+    for scenario in list_scenarios():
+        data = scenario_to_out(scenario)
+        assert set(data) == expected_keys
+        assert data["key"] == scenario.key
+        assert isinstance(data["label"], str) and data["label"]
+        assert isinstance(data["description"], str) and data["description"]
+        assert isinstance(data["retention"], str) and data["retention"]
+        # 对外是 list（Pydantic 字段是 list[str]），内部不可变用 tuple
+        assert isinstance(data["content_types"], list) and data["content_types"]
+        assert set(data["content_types"]) <= allowed_content_types
+        assert data["strategy"] in STRATEGY_KEYS
+        assert data["mask_level"] in {"L1", "L2", "L3"}
+        assert data["min_level"] in LEVEL_KEYS
+        assert isinstance(data["enable_l2"], bool)
+        assert isinstance(data["enable_l3"], bool)
+        assert isinstance(data["enable_ner"], bool)
 
 
-def test_scenarios_detail_200(client):
-    """GET /api/v1/scenarios/medical 返回详情，含 sample 与 recommended_strategy。"""
-    resp = client.get("/api/v1/scenarios/medical")
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["id"] == "medical"
-    assert body["name"] == "医疗病历"
-    assert body["sample"]
-    assert body["recommended_strategy"] == "partial"
-    assert body["recommended_min_level"] == "L2"
-    assert body["recommended_enable_l2"] is True
-    assert body["recommended_enable_ner"] is True
-    assert body["audit_recommended"] is True
+def test_scenario_is_immutable() -> None:
+    """场景是进程内共享配置，不能被调用方改掉（frozen dataclass）。"""
+    scenario = get_scenario("medical")
+    assert scenario is not None
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        scenario.strategy = "partial"  # type: ignore[misc]
 
 
-def test_hr_scenario_uses_pseudonym(client):
-    """HR 场景人名用假名替换，策略为 pseudonym。"""
-    resp = client.get("/api/v1/scenarios/hr")
-    assert resp.status_code == 200
-    assert resp.json()["recommended_strategy"] == "pseudonym"
+def test_medical_and_education_templates() -> None:
+    """医疗场景走哈希 + L2 + 最低 HIGH；教育场景走部分遮蔽 + L2。"""
+    medical = get_scenario("medical")
+    assert medical is not None
+    assert medical.label == "医院→科研"
+    assert medical.strategy == "hash"
+    assert medical.mask_level == "L2"
+    assert medical.min_level == "HIGH"
+    assert medical.enable_l2 is True
+    assert medical.enable_l3 is False
+    assert medical.enable_ner is False
+    assert "原文不落库" in medical.retention
+    assert "哈希" in medical.retention
+
+    education = get_scenario("education")
+    assert education is not None
+    assert education.label == "教学/学生数据"
+    assert education.strategy == "partial"
+    assert education.mask_level == "L2"
+    assert education.min_level == "SAFE"
+    assert education.enable_l2 is False
+    assert set(education.content_types) == {"text", "csv"}
 
 
-def test_scenarios_detail_404(client):
-    """不存在的场景 id 返回 404。"""
-    resp = client.get("/api/v1/scenarios/nonexistent")
-    assert resp.status_code == 404
-    assert "不存在" in resp.json()["detail"]
+def test_default_scenario_exists() -> None:
+    assert DEFAULT_SCENARIO_KEY == "education"
+    scenario = get_scenario(DEFAULT_SCENARIO_KEY)
+    assert scenario is not None
+    assert scenario.key == DEFAULT_SCENARIO_KEY
 
 
-def test_scenarios_ids_unique():
-    """场景 id 不重复（前端用 id 做 key）。"""
-    ids = [s.id for s in SCENARIOS]
-    assert len(ids) == len(set(ids))
-
-
-def test_scenarios_strategies_valid():
-    """所有 recommended_strategy 必须是合法策略。"""
-    valid = {"block", "partial", "hash", "generalize", "pseudonym", "encrypt"}
-    for s in SCENARIOS:
-        assert s.recommended_strategy in valid, f"场景 {s.id} 策略非法：{s.recommended_strategy}"
-
-
-def test_scenarios_levels_valid():
-    """所有 recommended_min_level 必须是合法级别。"""
-    valid = {"SAFE", "L1", "L2", "L3"}
-    for s in SCENARIOS:
-        assert s.recommended_min_level in valid, f"场景 {s.id} 级别非法：{s.recommended_min_level}"
-
-
-def test_scenarios_samples_have_sensitive_data():
-    """每个场景的样例文本应至少命中一条 L1 规则（保证演示有效）。
-
-    用规则引擎直接 detect，断言命中列表非空。
-    """
-    from app.identify import detect
-
-    for s in SCENARIOS:
-        hits = detect(s.sample)
-        assert hits, f"场景 {s.id} 样例未命中任何规则，演示会空"
-
-
-def test_scenarios_samples_detect_key_entities():
-    """场景样例里的关键实体必须被识别，避免演示数据校验位不通过而漏检。
-
-    身份证号、银行卡号都带校验位（MOD 11-2 / Luhn），随手编的号码会被规则丢弃；
-    这里用真实识别结果守住演示数据，防止后续改样例时再次退化。
-    """
-    from app.identify import EntityType, detect
-
-    expected = {
-        "medical": {EntityType.ID_CARD},
-        "government": {EntityType.ID_CARD},
-        "finance": {EntityType.ID_CARD, EntityType.BANK_CARD},
-        "hr": {EntityType.ID_CARD},
-    }
-    for scenario in SCENARIOS:
-        required = expected.get(scenario.id)
-        if not required:
-            continue
-        hits = detect(scenario.sample)
-        types = {hit.type for hit in hits}
-        missing = required - types
-        assert not missing, f"场景 {scenario.id} 样例缺少命中类别：{missing}"
-
-    finance = next(s for s in SCENARIOS if s.id == "finance")
-    bank_cards = {h.value for h in detect(finance.sample) if h.type == EntityType.BANK_CARD}
-    expected_cards = {"6222020200012345670", "6222020200098765437"}
-    missing_cards = expected_cards - bank_cards
-    assert not missing_cards, f"金融场景缺少银行卡号命中：{missing_cards}"
-
-    # 「姓名孙七」「户名赵六」没有冒号，靠 name_label 规则兜住，避免演示时姓名漏掩
-    expected_names = {"hr": "孙七", "finance": "赵六"}
-    for scenario in SCENARIOS:
-        expected_name = expected_names.get(scenario.id)
-        if not expected_name:
-            continue
-        names = {hit.value for hit in detect(scenario.sample) if hit.type == EntityType.NAME}
-        assert expected_name in names, f"场景 {scenario.id} 缺少姓名命中：{expected_name}"
+def test_get_scenario_normalizes_key_and_unknown_returns_none() -> None:
+    assert get_scenario("MEDICAL") is not None
+    assert get_scenario("  publish  ") is not None
+    assert get_scenario("unknown") is None
+    assert get_scenario("") is None
+    assert get_scenario(None) is None

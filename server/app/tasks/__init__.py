@@ -3,8 +3,6 @@
 from .export import EXPORT_FORMATS, export_findings, masked_document
 from .service import (
     create_task,
-    delete_task,
-    delete_tasks,
     get_finding,
     get_task,
     list_tasks,
@@ -15,8 +13,6 @@ from .service import (
 __all__ = [
     "EXPORT_FORMATS",
     "create_task",
-    "delete_task",
-    "delete_tasks",
     "export_findings",
     "get_finding",
     "get_task",

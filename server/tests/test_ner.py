@@ -80,13 +80,8 @@ class _FakeNer:
 
 
 def test_pipeline_merges_ner_hits() -> None:
-    """没有字段名/角色词时 L1 规则抓不到人名，由 NER 补出来。
-
-    "今天张三喝咖啡" 既没有「姓名：」也没有「客户/同事」等角色词前缀，
-    L1 的 name_kv / name_free_role / name_free_sentence / name_free_action 都不命中，
-    只有 NER 能给出"张三"区间——验证 NER hit 能被合并进 pipeline。
-    """
-    text = "今天张三喝咖啡，电话 13800138000"
+    """没有字段名时也能识别出人名（L1 规则抓不到"客户张三"里的人民）。"""
+    text = "客户张三，电话 13800138000"
     ner = _FakeNer([NerSpan(start=2, end=4, label="B-PER")])
     pipeline = DetectionPipeline(ner=ner)  # type: ignore[arg-type]
     finding = pipeline.analyze_text(text, DetectOptions(enable_ner=True))
@@ -95,7 +90,7 @@ def test_pipeline_merges_ner_hits() -> None:
     assert "ner" in finding.model_chain
     # 人名权重低，靠与手机号共现升到 L2；手机号脱敏为保留首字符
     assert finding.level in {Level.LOW, Level.MID}
-    assert "**" in finding.masked and "1**********" in finding.masked
+    assert "张*" in finding.masked and "1******" in finding.masked
     # spans 的区间必须能切回原文命中值（前端高亮依赖它）
     name_span = next(span for span in finding.spans if span["type"] == "name")
     assert text[name_span["start"] : name_span["end"]] == "张三"

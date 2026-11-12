@@ -6,7 +6,7 @@ package buildinfo
 
 // Version 是采集端版本号。采集端与客户端各自独立编号（见 AGENTS.md「版本号规则」），
 // 两个号段互不相干，不要把这里与 client/ 的版本号对齐。
-const Version = "0.24.1"
+const Version = "0.25.0"
 
 // Features 列出该版本对外提供的可选能力；新增能力时在此追加。
 //
@@ -18,6 +18,9 @@ const Version = "0.24.1"
 // Windows 构建 + 进程具备管理员权限。因此它不在下面的静态清单里，
 // 而由入口在启动阶段探测通过后调用 Enable 追加（见 cmd/netmon/capability_windows.go），
 // 否则客户端会展示一个点了必然失败的入口（双模式设计文档 §4.3）。
+//
+// dlp.online 同理：只有配置 [dlp].enabled = true 时入口才追加，
+// 表示"采集链路正在做内容级检测"，而不是"这个版本具备该能力"。
 var Features = []string{"history", "sessions", "alerts", "capture.dump", "actions.run", "files", "stream", "topn", "system.upgrade", "capture.multiqueue", "capture.filter", "plugins", "capture.cpupin", "capture.offline"}
 
 // Enable 追加一项运行时探测出的能力（幂等：重复调用不会产生重复项）。

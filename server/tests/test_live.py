@@ -214,22 +214,6 @@ def test_live_follow_pcapng_end_to_end(client, database, data_dir) -> None:
     assert stopped.json()["running"] is False
 
 
-def test_live_start_accepts_data_prefixed_path(client, database, data_dir) -> None:
-    """前端默认值是 data/live.pcap：应解析成 <数据目录>/live.pcap，而不是再套一层 data/。"""
-    pcap_path = data_dir / "live-data-prefix.pcap"
-    pcap_path.parent.mkdir(parents=True, exist_ok=True)
-    pcap_path.write_bytes(_pcap_header())
-
-    started = client.post(
-        "/api/v1/traffic/live/start",
-        json={"pcap_path": "data/live-data-prefix.pcap", "interval_ms": 120, "window_s": 0.3},
-    )
-    assert started.status_code == 201, started.text
-    assert Path(started.json()["pcap_path"]).resolve() == pcap_path.resolve()
-
-    client.post(f"/api/v1/traffic/live/{started.json()['live_id']}/stop")
-
-
 # ---------------- 外部推送 ----------------
 
 
@@ -255,7 +239,7 @@ def test_ingest_creates_task(client, database) -> None:
 
     findings = client.get(f"/api/v1/tasks/{out.task_id}/findings").json()["items"]
     assert findings[0]["level"] == "L3"
-    assert "110105********002X" in findings[0]["masked"]
+    assert "已屏蔽" in findings[0]["masked"]
     assert ID_CARD not in findings[0]["masked"]
 
 
@@ -298,6 +282,13 @@ def test_live_follow_and_stop(client, database, data_dir: Path, live_manager) ->
     assert task["total_findings"] >= 1
     assert task["source"].startswith("live:")
 
+    # 告警联动：窗口任务落库时同事务生成告警，会话状态能按会话聚合看到
+    assert _wait(lambda: get_live().get("alert_total", 0) >= 1), get_live()
+    session = get_live()
+    assert session["alert_open"] >= 1
+    assert session["alert_by_level"].get("L3", 0) >= 1
+    assert session["last_alert_id"] and session["last_alert_title"]
+
     stopped = client.post(f"/api/v1/traffic/live/{live_id}/stop")
     assert stopped.status_code == 200
     assert stopped.json()["running"] is False
@@ -307,6 +298,20 @@ def test_live_follow_and_stop(client, database, data_dir: Path, live_manager) ->
     cleared = client.delete("/api/v1/traffic/live")
     assert cleared.status_code == 200
     assert "cleared" in cleared.json()
+
+
+def test_live_start_accepts_data_prefixed_relative_path(client, database, data_dir: Path, live_manager) -> None:
+    """前端/README 默认传 data/live.pcap，不能被解析成 data/data/live.pcap。"""
+    target = data_dir / "live-prefixed.pcap"
+    target.write_bytes(_pcap_header())
+    started = client.post(
+        "/api/v1/traffic/live/start",
+        json={"pcap_path": "data/live-prefixed.pcap", "interval_ms": 300, "window_s": 1.0},
+    )
+    assert started.status_code == 201, started.text
+    live_id = started.json()["live_id"]
+    assert Path(started.json()["pcap_path"]).resolve() == target.resolve()
+    assert client.post(f"/api/v1/traffic/live/{live_id}/stop").status_code == 200
 
 
 def test_live_rejects_path_outside_data_dir(client, database, live_manager) -> None:
@@ -348,3 +353,116 @@ def test_demo_pcap_still_imports(client, database) -> None:
     assert response.json()["sessions"] == 3
     # write_pcap 与测试里手工拼的 pcap 应能互相读取（帧结构约定一致）
     assert len(list(__import__("app.traffic", fromlist=["iter_packets"]).iter_packets(write_pcap([])))) == 0
+
+
+# ---------------- 长跑健壮性（体检清单 audit-core P2-5/P3-6/P3-7/P3-10） ----------------
+
+
+def test_follower_resets_after_file_rotated_shorter(tmp_path: Path) -> None:
+    """抓包工具轮转后文件变短：必须从头重读，而不是 seek 越界后永远读空。"""
+    path = tmp_path / "rotated.pcap"
+    frame = _synth_frame(40000, f"手机 {PHONE}")
+    path.write_bytes(_pcap_header() + _record(1.0, frame))
+    follower = PcapFollower(path)
+    assert len(follower.poll()) == 1
+
+    # 同路径换成更短的新文件（模拟 dumpcap 轮转）
+    path.write_bytes(_pcap_header())
+    assert follower.poll() == []
+    new_frame = _synth_frame(40001, "新正文")
+    with path.open("ab") as handle:
+        handle.write(_record(2.0, new_frame))
+    packets = follower.poll()
+    assert len(packets) == 1, "轮转后应从新文件头继续解析"
+
+
+def test_live_bounds_seen_and_pending(monkeypatch, tmp_path: Path) -> None:
+    """去重集合与待落库队列都要有上限，长时间失败不能无限吃内存。"""
+    from app.identify import DetectOptions
+    from app.traffic import live as live_mod
+    from app.traffic.pcap import RawPacket
+
+    monkeypatch.setattr(live_mod, "MAX_SEEN_KEYS", 5)
+    monkeypatch.setattr(live_mod, "MAX_PENDING_SEGMENTS", 3)
+    session = live_mod._LiveSession(
+        live_id="bounded",
+        pcap_path=tmp_path / "x.pcap",
+        source="live:x",
+        interval_ms=10,
+        window_s=999.0,
+        options=DetectOptions(),
+        db=None,  # type: ignore[arg-type]
+        pipeline=None,  # type: ignore[arg-type]
+    )
+    for index in range(10):
+        frame = _synth_frame(41000 + index, f"手机 {PHONE} #{index}")
+        live_mod._ingest_packets(session, [RawPacket(ts=float(index), linktype=1, frame=frame)])
+    assert len(session._seen) <= 5
+    assert len(session._pending) <= 3
+    assert session.dropped > 0
+
+
+def test_flush_window_requeues_on_create_failure(monkeypatch, tmp_path: Path) -> None:
+    """任务创建失败时正文不能丢：放回队头等下一个窗口重试。"""
+    from app.identify import DetectOptions
+    from app.parsers.base import Segment
+    from app.traffic import live as live_mod
+
+    monkeypatch.setattr(live_mod, "MAX_PENDING_SEGMENTS", 10)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("db is gone")
+
+    monkeypatch.setattr(live_mod, "create_task", boom)
+    session = live_mod._LiveSession(
+        live_id="retry",
+        pcap_path=tmp_path / "x.pcap",
+        source="live:x",
+        interval_ms=10,
+        window_s=0.1,
+        options=DetectOptions(),
+        db=None,  # type: ignore[arg-type]
+        pipeline=None,  # type: ignore[arg-type]
+        _pending=[Segment(path="$", text="正文一"), Segment(path="$", text="正文二")],
+    )
+    live_mod._flush_window(session)
+    assert [segment.text for segment in session._pending] == ["正文一", "正文二"]
+    assert "create_task" in session.last_error
+
+
+def test_live_concurrent_start_only_one_session(database, data_dir: Path, live_manager) -> None:
+    """并发 start 同一文件只能成功一个，否则会重复落库 findings/审计。"""
+    import threading
+
+    from app.identify import DetectionPipeline
+    from app.traffic.live import LiveError, get_live_manager
+
+    path = data_dir / "race.pcap"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(demo_pcap())
+    manager = get_live_manager()
+    outcomes: list[str] = []
+    barrier = threading.Barrier(2)
+
+    def attempt() -> None:
+        barrier.wait()
+        try:
+            manager.start(
+                db=database,
+                pipeline=DetectionPipeline(),
+                pcap_path=path,
+                interval_ms=60,
+                window_s=0.5,
+                options=__import__("app.identify", fromlist=["DetectOptions"]).DetectOptions(),
+            )
+            outcomes.append("ok")
+        except LiveError:
+            outcomes.append("dup")
+
+    threads = [threading.Thread(target=attempt) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert sorted(outcomes) == ["dup", "ok"]
+    manager.stop_all()

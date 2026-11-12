@@ -111,6 +111,7 @@ def list_preference_users(
             """,
             (THEME_KEY, limit),
         ).fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM user_prefs WHERE key = ?", (THEME_KEY,)).fetchone()[0]
     users = [
         PreferenceUserOut(
             operator_id=row["operator_id"],
@@ -119,7 +120,7 @@ def list_preference_users(
         )
         for row in rows
     ]
-    return PreferenceUsersOut(users=users, total=len(users))
+    return PreferenceUsersOut(users=users, total=total)
 
 
 def _iso(value: str) -> datetime:

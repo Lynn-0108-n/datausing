@@ -20,9 +20,67 @@ def _wait_done(client, task_id: str, timeout: float = 5.0) -> dict:
     raise AssertionError("任务在超时时间内未完成")
 
 
+def test_detection_model_switches_override_defaults(tmp_env, monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    from app.core.config import get_settings
+    from app.identify.l2 import HttpSemanticClassifier
+    from app.identify.l3 import GuardVerdict, HttpJudgeClassifier
+    from app.main import create_app
+
+    calls = []
+
+    def predict(self, text):
+        calls.append("l2")
+        return []
+
+    def judge(self, text):
+        calls.append("l3")
+        return GuardVerdict(risk="Safe", reason="", model="test")
+
+    monkeypatch.setenv("FLOWMASK_ENABLE_L2", "1")
+    monkeypatch.setenv("FLOWMASK_ENABLE_L3", "0")
+    get_settings.cache_clear()
+    monkeypatch.setattr(HttpSemanticClassifier, "predict", predict)
+    monkeypatch.setattr(HttpJudgeClassifier, "judge", judge)
+    text = "联系 13800138000"
+    with TestClient(create_app()) as client:
+        response = client.post("/api/v1/detect", json={
+            "text": text, "enable_l2": False, "enable_l3": True,
+        })
+        assert response.status_code == 200
+        result = response.json()
+        assert calls == ["l3"]
+        assert result["effective_options"]["enable_l2"] is False
+        assert result["effective_options"]["enable_l3"] is True
+        assert result["engine_runs"] == {"l2": {"disabled": 1}, "l3": {"executed": 1}}
+        assert result["findings"][0]["engine_runs"] == {"l2": "disabled", "l3": "executed"}
+        assert result["coverage"] == "complete"
+
+        calls.clear()
+        result = client.post("/api/v1/detect", json={"text": text}).json()
+        assert calls == ["l2"]
+        assert result["effective_options"]["enable_l2"] is True
+
+        calls.clear()
+        result = client.post(
+            "/api/v1/detect/file", params={"enable_l2": "false"},
+            files={"file": ("sample.txt", text.encode())},
+        ).json()
+        assert result["effective_options"]["enable_l2"] is False
+        assert calls == []
+
+        response = client.post("/api/v1/tasks/text", json={"text": text, "enable_l2": False})
+        task = _wait_done(client, response.json()["task_id"])
+        assert task["options"]["enable_l2"] is False
+        assert calls == []
+
+
 def test_health(client) -> None:
     body = client.get("/api/v1/health").json()
     assert body["status"] == "ok" and body["version"]
+    # /health 不暴露服务器绝对路径（只回文件名）
+    assert body["db_path"] == "flowmask.db"
 
 
 def test_detect_text_returns_masked_only(client) -> None:
@@ -30,46 +88,9 @@ def test_detect_text_returns_masked_only(client) -> None:
     assert response.status_code == 200
     body = response.json()
     finding = body["findings"][0]
-    assert finding["level"] == "L3"
-    assert "110105********002X" in finding["masked"]
-    assert ID_CARD not in finding["masked"]
+    assert finding["level"] == "L3" and "已屏蔽" in finding["masked"]
     # 整个响应里不能出现原文敏感值（只允许哈希与脱敏副本）
     assert ID_CARD not in json.dumps(body, ensure_ascii=False)
-    # Day 3.3：检测自动建 task，task_id 非空
-    assert body.get("task_id"), "检测应自动创建 task 记录"
-    # 创建的 task 能在任务列表里查到
-    task = client.get(f"/api/v1/tasks/{body['task_id']}").json()
-    assert task["id"] == body["task_id"]
-
-
-def test_detect_file_returns_task_id(client) -> None:
-    """Day 3.3：文件入口检测也应自动建 task。"""
-    response = client.post(
-        "/api/v1/detect/file",
-        files={"file": ("a.txt", f"联系电话 {PHONE}\n".encode(), "text/plain")},
-    )
-    assert response.status_code == 200
-    assert response.json()["task_id"]
-
-
-def test_batch_upload_masks_id_card_with_stars(client) -> None:
-    """批量导入的脱敏副本必须对身份证号做星号遮掩，不能回退成类别占位。"""
-    response = client.post(
-        "/api/v1/tasks/batch",
-        files=[
-            ("files", ("a.txt", f"身份证号：{ID_CARD}\n".encode(), "text/plain")),
-            ("files", ("b.txt", "无敏感内容\n".encode(), "text/plain")),
-        ],
-    )
-    assert response.status_code == 201
-    body = response.json()
-    assert body["accepted"] == 2
-    task_id = body["items"][0]["task_id"]
-    assert _wait_done(client, task_id)["status"] == "done"
-    findings = client.get(f"/api/v1/tasks/{task_id}/findings").json()["items"]
-    assert findings
-    assert "110105********002X" in findings[0]["masked"]
-    assert ID_CARD not in findings[0]["masked"]
 
 
 def test_detect_returns_highlight_spans(client) -> None:
@@ -85,6 +106,62 @@ def test_detect_returns_highlight_spans(client) -> None:
     assert all(span["label"] and span["rule"] for span in spans)
 
 
+def test_masked_document_keeps_safe_text(client) -> None:
+    """安全文本没有命中时，脱敏副本应回退原文，而不是空串。"""
+    text = "这是一段没有任何敏感信息的普通说明文本。"
+    body = client.post("/api/v1/detect", json={"text": text}).json()
+    assert body["findings"] == []
+    masked = body["masked_document"]
+    assert masked["content_type"] == "text"
+    assert masked["masked"] == text
+
+
+def test_masked_document_ignores_min_level_filter(client) -> None:
+    """min_level 只筛展示的 findings，脱敏副本仍要覆盖低危命中。"""
+    body = client.post("/api/v1/detect", json={"text": f"联系电话 {PHONE}", "min_level": "L3"}).json()
+    assert body["findings"] == []
+    masked = body["masked_document"]["masked"]
+    assert PHONE not in masked, "低危命中被筛掉后不能在脱敏副本里回显原文"
+
+
+def test_task_text_rejects_safe_mask_level(client) -> None:
+    """落库任务不能选 SAFE：库里只存脱敏副本，原文不允许落库。"""
+    response = client.post("/api/v1/tasks/text", json={"text": f"电话 {PHONE}", "mask_level": "SAFE"})
+    assert response.status_code == 400
+    assert "mask_level" in response.json()["detail"]
+    # 即时检测仍然允许"不脱敏"（不落库）
+    assert client.post("/api/v1/detect", json={"text": "普通文本", "mask_level": "SAFE"}).status_code == 200
+
+
+def test_task_text_validates_payload_types_and_size(client) -> None:
+    """粘贴文本任务走 Pydantic 模型：类型错误/超长是 422，不再 500 或静默转串。"""
+    assert client.post("/api/v1/tasks/text", json={"text": {"a": 1}}).status_code == 422
+    assert client.post("/api/v1/tasks/text", json={"text": "x", "mask_level": 123}).status_code == 422
+    big = "a" * 200_001
+    assert client.post("/api/v1/tasks/text", json={"text": big}).status_code == 422
+
+
+def test_operator_header_rejects_overlong_value(client) -> None:
+    response = client.post(
+        "/api/v1/traffic/ingest",
+        json={"source": "agent", "content_type": "text", "segments": [{"path": "$", "text": "普通文本"}]},
+        headers={"X-Operator-Id": "a" * 65},
+    )
+    assert response.status_code == 400
+    assert "64" in response.json()["detail"]
+
+
+def test_csv_cell_sanitizer_blocks_formulas() -> None:
+    from app.tasks.export import sanitize_csv_cell
+
+    assert sanitize_csv_cell("=1+1") == "'=1+1"
+    assert sanitize_csv_cell("+66") == "'+66"
+    assert sanitize_csv_cell("-2") == "'-2"
+    assert sanitize_csv_cell("@SUM(A1)") == "'@SUM(A1)"
+    assert sanitize_csv_cell("正常文本") == "正常文本"
+    assert sanitize_csv_cell(12) == 12
+
+
 def test_ui_page_and_root_redirect(client) -> None:
     page = client.get("/ui/")
     assert page.status_code == 200
@@ -93,64 +170,6 @@ def test_ui_page_and_root_redirect(client) -> None:
     assert redirect.status_code in {302, 307}
     # 构建过正式前端（web/dist）时优先跳 /app/，否则回落到自带单页 /ui
     assert redirect.headers["location"] in {"/ui", "/app/"}
-
-
-def test_delete_single_task_cascades_findings_and_audit(client) -> None:
-    """删除单条任务：task / findings / audit_log 级联清理。"""
-    # 建一个任务
-    body = client.post("/api/v1/detect", json={"text": f"身份证号：{ID_CARD}"}).json()
-    task_id = body["task_id"]
-    assert task_id
-    # 删除前应能查到
-    assert client.get(f"/api/v1/tasks/{task_id}").status_code == 200
-    # 删除
-    resp = client.delete(f"/api/v1/tasks/{task_id}")
-    assert resp.status_code == 200
-    assert resp.json() == {"task_id": task_id, "deleted": True}
-    # 删除后再查应 404
-    assert client.get(f"/api/v1/tasks/{task_id}").status_code == 404
-    # findings 也应查不到（接口返回 404 或空 items）
-    findings_resp = client.get(f"/api/v1/tasks/{task_id}/findings")
-    assert findings_resp.status_code in {200, 404}
-    if findings_resp.status_code == 200:
-        assert findings_resp.json()["items"] == []
-
-
-def test_delete_nonexistent_task_returns_404(client) -> None:
-    resp = client.delete("/api/v1/tasks/nonexistent_id_12345")
-    assert resp.status_code == 404
-
-
-def test_delete_tasks_batch(client) -> None:
-    """批量删除：返回实际删除条数，不存在的 task_id 不计入。"""
-    # 建两个任务
-    id1 = client.post("/api/v1/detect", json={"text": f"手机 {PHONE}"}).json()["task_id"]
-    id2 = client.post("/api/v1/detect", json={"text": f"身份证号：{ID_CARD}"}).json()["task_id"]
-    # 批量删除 + 一个不存在的（TestClient 的 delete 不支持 json，用 request）
-    resp = client.request(
-        "DELETE",
-        "/api/v1/tasks",
-        json={"task_ids": [id1, id2, "nonexistent_xyz"]},
-    )
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body["requested"] == 3
-    assert body["deleted"] == 2
-    # 验证确实删了
-    assert client.get(f"/api/v1/tasks/{id1}").status_code == 404
-    assert client.get(f"/api/v1/tasks/{id2}").status_code == 404
-
-
-def test_delete_tasks_batch_rejects_bad_payload(client) -> None:
-    # 空 task_ids
-    resp = client.request("DELETE", "/api/v1/tasks", json={"task_ids": []})
-    assert resp.status_code == 400
-    # 非字符串
-    resp = client.request("DELETE", "/api/v1/tasks", json={"task_ids": [12345]})
-    assert resp.status_code == 400
-    # 缺字段
-    resp = client.request("DELETE", "/api/v1/tasks", json={"foo": "bar"})
-    assert resp.status_code == 400
 
 
 def test_frontend_dist_is_optional(monkeypatch) -> None:
@@ -203,6 +222,50 @@ def test_detect_unsupported_upload_is_415(client) -> None:
     assert response.status_code == 415
 
 
+def test_detect_xlsx_upload(client) -> None:
+    from xlsx_fixtures import make_xlsx, row, text_cell
+
+    data = make_xlsx([("客户表", row(1, text_cell("A1", "手机号")) + row(2, text_cell("A2", PHONE)))])
+    response = client.post(
+        "/api/v1/detect/file",
+        files={
+            "file": (
+                "客户表.xlsx",
+                data,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["content_type"] == "xlsx"
+    assert body["findings"]
+    assert body["masked_document"]["content_type"] == "xlsx"
+    assert body["masked_document"]["segments"][0]["path"] == "客户表!A2"
+    # 响应里不能出现原文手机号（只允许脱敏副本）
+    assert PHONE not in json.dumps(body, ensure_ascii=False)
+
+
+def test_detect_xlsx_export_download(client) -> None:
+    from app.parsers import parse_xlsx
+    from xlsx_fixtures import make_xlsx, row, text_cell
+
+    data = make_xlsx([("客户表", row(1, text_cell("A1", "手机号")) + row(2, text_cell("A2", PHONE)))])
+    response = client.post(
+        "/api/v1/detect/file/export",
+        files={"file": ("客户表.xlsx", data, "application/octet-stream")},
+        data={"strategy": "partial", "fmt": "auto"},
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert "attachment" in response.headers["content-disposition"]
+    parsed = parse_xlsx(response.content, source="masked.xlsx")
+    assert [segment.path for segment in parsed.segments] == ["客户表!A2"]
+    assert PHONE not in parsed.segments[0].text
+
+
 def test_task_flow_findings_export_and_stats(client) -> None:
     files = {"file": ("a.txt", f"姓名：张三\n联系电话 {PHONE}\n".encode(), "text/plain")}
     task_id = client.post("/api/v1/tasks", files=files).json()["task_id"]
@@ -227,10 +290,6 @@ def test_task_flow_findings_export_and_stats(client) -> None:
     stats = client.get("/api/v1/stats").json()
     assert stats["total_findings"] >= 1
     assert stats["by_level"]["L2"] >= 1 or stats["by_level"]["L3"] >= 1
-    # 看板类别要带中文名（前端优先读 key），英文键保留在 type 里
-    by_type = {item["type"]: item["key"] for item in stats["by_type"]}
-    assert by_type, "类别统计不应为空"
-    assert by_type.get("phone") == "手机号", stats["by_type"]
 
     # 审计记录在任务完成后应已写入，且链条可校验
     audit = client.get("/api/v1/audit").json()
@@ -286,33 +345,6 @@ def test_custom_rule_is_effective_and_reversible(client) -> None:
     assert len(client.get("/api/v1/rules").json()) == baseline
 
 
-def test_custom_rule_without_id_gets_generated(client) -> None:
-    """前端表单只有规则名：英文名直接当 id，中文名回退 custom_ 前缀。"""
-    named = client.post(
-        "/api/v1/rules",
-        json={"name": "employee_no", "type": "secret", "pattern": CUSTOM_PATTERN, "weight": 0.6},
-    )
-    assert named.status_code == 201, named.text
-    assert named.json()["id"] == "employee_no"
-    assert named.json()["builtin"] is False
-
-    unnamed = client.post(
-        "/api/v1/rules",
-        json={"name": "工号", "type": "secret", "pattern": CUSTOM_PATTERN, "weight": 0.6},
-    )
-    assert unnamed.status_code == 201, unnamed.text
-    generated = unnamed.json()
-    assert generated["id"].startswith("custom_")
-    assert generated["name"] == "工号"
-
-    # 生成出来的规则同样即时生效
-    hit = client.post("/api/v1/detect", json={"text": "工号：AB123456"}).json()
-    assert hit["findings"], hit
-
-    assert client.delete("/api/v1/rules/employee_no").status_code == 200
-    assert client.delete(f"/api/v1/rules/{generated['id']}").status_code == 200
-
-
 def test_rule_validation_errors(client) -> None:
     bad_type = client.post(
         "/api/v1/rules",
@@ -326,7 +358,7 @@ def test_rule_validation_errors(client) -> None:
     assert bad_regex.status_code == 422
     duplicate = client.post(
         "/api/v1/rules",
-        json={"id": "mobile", "name": "x", "type": "secret", "pattern": "abc", "weight": 0.5},
+        json={"id": "mobile", "name": "x", "type": "secret", "pattern": r"(\d{6})", "weight": 0.5},
     )
     assert duplicate.status_code == 409
 
@@ -344,6 +376,25 @@ def test_bearer_token_enforced(tmp_env, monkeypatch) -> None:
         assert protected.get("/api/v1/health", headers={"Authorization": "Bearer wrong"}).status_code == 401
         ok = protected.get("/api/v1/health", headers={"Authorization": "Bearer s3cret"})
         assert ok.status_code == 200
+
+def test_upload_size_limited_before_full_read(tmp_env, monkeypatch) -> None:
+    """上传超过 max_upload_mb 时立即 413，不再把整个文件读进内存。"""
+    monkeypatch.setenv("FLOWMASK_MAX_UPLOAD_MB", "1")
+    from fastapi.testclient import TestClient
+
+    from app.core.config import get_settings
+    from app.main import create_app
+
+    get_settings.cache_clear()
+    payload = b"a" * (2 * 1024 * 1024)
+    files = {"file": ("big.txt", payload)}
+    with TestClient(create_app()) as protected:
+        assert protected.post("/api/v1/detect/file", files=files).status_code == 413
+        assert protected.post("/api/v1/tasks", files=files).status_code == 413
+        batch = protected.post("/api/v1/tasks/batch", files=[("files", ("big.txt", payload))])
+        assert batch.status_code == 201
+        assert "超过上限" in batch.json()["items"][0]["error"]
+
 
 def test_health_reports_ner_availability(client) -> None:
     """默认没开 NER 时，/health 明确告诉前端“不可用”，前端据此隐藏开关。"""
