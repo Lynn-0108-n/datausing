@@ -270,9 +270,9 @@ watch(collapsed, () => {
   hoverIndex.value = -1;
   if (!collapsed.value) measureBrand();
 });
-// 品牌字标：渐变蓝手写体图片（public 下经 Vite base 前缀访问）
-const logoUrl = import.meta.env.BASE_URL + "logo-gradient.png";
-const logoMonoUrl = import.meta.env.BASE_URL + "logo-mono-gradient.png";
+// 品牌字标：新图标 + 手写体字标（public 下经 Vite base 前缀访问；带版本号避开 1 小时静态缓存）
+const logoUrl = import.meta.env.BASE_URL + "logo-gradient.png?v=2";
+const logoMonoUrl = import.meta.env.BASE_URL + "logo-mono-gradient.png?v=2";
 // 展开态品牌区实测高度：收起后沿用同一高度，图标上下位置保持不变
 const brandRef = ref(null);
 const brandHeight = ref(0);
